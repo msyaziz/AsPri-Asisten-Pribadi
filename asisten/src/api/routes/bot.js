@@ -6,7 +6,6 @@ export const botRouter = Router();
 botRouter.get('/status', (req, res) => {
   try {
     const status = getStatus();
-    // Kembalikan hanya field yang diizinkan (tanpa QR / info sensitif)
     res.json({
       state: status.state,
       since: status.since,
