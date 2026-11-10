@@ -25,6 +25,7 @@ const envSchema = z
 
     WHITELIST_JID: z.string().optional().default(''),
     WHITELIST_LID: z.string().optional().default(''),
+    BOT_PHONE_NUMBER: z.string().optional().default(''),
 
     GROQ_API_KEY: z.string().optional().default(''),
     GROQ_TEXT_MODEL: z.string().optional().default(''),

@@ -188,6 +188,27 @@ export async function startBot() {
     printQRInTerminal: false,
   });
 
+  // Jika BOT_PHONE_NUMBER diisi dan belum terdaftar, minta Pairing Code 8 digit (tanpa kamera)
+  if (!state.creds.registered && env.BOT_PHONE_NUMBER) {
+    const cleanPhone = env.BOT_PHONE_NUMBER.replace(/\D/g, '').replace(/^0/, '62');
+    setTimeout(async () => {
+      try {
+        const code = await sock.requestPairingCode(cleanPhone);
+        console.log('\n======================================================');
+        console.log('📱 KODE TAUTKAN WHATSAPP (8 DIGIT):');
+        console.log(`\n           👉  ${code}  👈\n`);
+        console.log('Cara masukkan di HP nomor cadangan:');
+        console.log('1. Buka WhatsApp > Perangkat Tertaut > Tautkan Perangkat');
+        console.log('2. Di bagian bawah layar scan kamera, klik:');
+        console.log('   "Tautkan dengan nomor telepon saja" (Link with phone number)');
+        console.log(`3. Masukkan kode: ${code}`);
+        console.log('======================================================\n');
+      } catch (err) {
+        logger.error({ err: err.message }, 'Gagal meminta pairing code dari WhatsApp');
+      }
+    }, 3000);
+  }
+
   sock.ev.on('creds.update', saveCreds);
 
   sock.ev.on('connection.update', async (update) => {
@@ -198,8 +219,11 @@ export async function startBot() {
       status.lastQrAt = new Date().toISOString();
       status.rawQr = qr;
       await logBotEvent('qr');
-      logger.info('QR Code diterima. Silakan scan dengan WhatsApp cadangan di terminal atau buka http://127.0.0.1:3000/qr.html:');
-      qrcode.generate(qr, { small: true });
+
+      if (!env.BOT_PHONE_NUMBER) {
+        logger.info('QR Code diterima. Silakan scan dengan WhatsApp cadangan di terminal:');
+        qrcode.generate(qr, { small: true });
+      }
       await saveQrArtifacts(qr);
     }
 
