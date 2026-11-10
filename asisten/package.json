@@ -1,0 +1,33 @@
+{
+  "name": "asisten",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Asisten Pribadi Self-Hosted: Bot WhatsApp + Web Dashboard",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "migrate": "node src/db/migrate.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^7.0.0-rc14",
+    "dotenv": "^18.0.10",
+    "express": "^5.3.0",
+    "helmet": "^8.3.0",
+    "luxon": "^3.7.2",
+    "p-queue": "^10.0.0",
+    "pg": "^8.23.1",
+    "pino": "^10.4.0",
+    "qrcode-terminal": "^0.12.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "pino-pretty": "^13.2.0",
+    "vitest": "^5.1.0"
+  }
+}
