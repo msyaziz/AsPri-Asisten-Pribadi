@@ -75,6 +75,7 @@ export async function chatCompletion({
   maxTokens = 400,
   purpose = 'chat',
   model = env.GROQ_TEXT_MODEL,
+  responseFormat = null,
 }) {
   await waitForRateLimitSlot();
 
@@ -89,6 +90,10 @@ export async function chatCompletion({
     temperature,
     max_tokens: maxTokens,
   };
+
+  if (responseFormat) {
+    payload.response_format = responseFormat;
+  }
 
   const startTime = Date.now();
   let attempt = 0;

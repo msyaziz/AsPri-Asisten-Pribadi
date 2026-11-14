@@ -3,6 +3,7 @@ module.exports = {
   apps: [{
     name: 'asisten',
     script: 'src/index.js',
+    cwd: __dirname,
     exec_mode: 'fork',
     instances: 1,
     node_args: '--max-old-space-size=384',
