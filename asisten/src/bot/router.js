@@ -9,6 +9,12 @@ import { sendText } from './sender.js';
 import { handleRegexCommand } from './regexCommands.js';
 import { isSensitive, SENSITIVE_WARNING_MESSAGE } from '../ai/sensitiveFilter.js';
 import { replyChat } from '../ai/chat.js';
+import { understandMessage } from '../ai/understand.js';
+import { executeTool } from '../tools/index.js';
+import { getActivePendingAction, resolvePendingAction } from '../services/pendingActions.js';
+import { addChatMessage } from '../services/chatHistory.js';
+import { ensurePreviousPeriodsClosed } from '../services/rollover.js';
+import { nowWib } from '../utils/time.js';
 import { CONSTANTS } from '../config/constants.js';
 
 // Antrean serial untuk seluruh pemrosesan pesan (concurrency: 1) demi stabilitas RAM & urutan pesan
@@ -60,8 +66,8 @@ async function deduplicateMessage(messageId) {
 }
 
 /**
- * Router utama penanganan pesan Baileys (Pipeline Fase 1).
- * Spesifikasi: docs/01-fase1-bot-dasar.md bagian 8.7
+ * Router utama penanganan pesan Baileys (Pipeline Fase 2).
+ * Spesifikasi: 00-konteks-aplikasi.md Bagian 9 & 02-fase2-keuangan-inti.md
  *
  * @param {any} upsert Objek messages.upsert dari Baileys
  */
@@ -80,7 +86,7 @@ export async function handleMessagesUpsert(upsert) {
  * Pipeline pemrosesan satu pesan WhatsApp.
  * @param {any} msg
  */
-async function processSingleMessage(msg) {
+export async function processSingleMessage(msg) {
   try {
     const key = msg.key;
     if (!key) return;
@@ -130,7 +136,7 @@ async function processSingleMessage(msg) {
     }
 
     // 4. Ekstraksi konten pesan
-    const { text, hasMedia } = extractContent(msg);
+    const { text, hasMedia, quotedStanzaId } = extractContent(msg);
 
     // 5. Rate limit lokal (30 pesan/menit)
     const rateStatus = checkLocalRateLimit();
@@ -143,18 +149,70 @@ async function processSingleMessage(msg) {
       return;
     }
 
-    // 6. (Placeholder pending_actions: Fase 2)
+    // Lazy Closure: Pastikan tidak ada periode masa lalu yang belum ditutup
+    try {
+      const dt = nowWib();
+      await ensurePreviousPeriodsClosed(dt.year, dt.month);
+    } catch (err) {
+      logger.warn({ err: err.message }, 'Gagal menjalankan lazy closure periode');
+    }
 
-    // 7. Regex fast-path commands (ping, bantuan, menu, reset)
+    // 6. Cek pending_actions (konfirmasi ya / tidak)
     if (text) {
-      const regexReply = await handleRegexCommand(text);
+      const lower = text.trim().toLowerCase();
+      if (lower === 'ya' || lower === 'y' || lower === 'ok' || lower === 'lanjut') {
+        const active = await getActivePendingAction();
+        if (active) {
+          await resolvePendingAction(active.id, 'confirmed');
+          const payload = typeof active.payload === 'string' ? JSON.parse(active.payload) : active.payload;
+
+          const execResult = await executeTool(payload.action, {
+            ...payload.context,
+            skipConfirmation: true,
+            waMessageId: key.id,
+          });
+
+          const replyIds = await sendText(rawRemoteJid, execResult.reply);
+          const botReplyId = replyIds?.[0] || null;
+          if (botReplyId && execResult.data?.id) {
+            if (payload.action.tool === 'add_transaction') {
+              await pool.query('UPDATE transactions SET bot_reply_id = $1 WHERE id = $2', [botReplyId, execResult.data.id]);
+              await pool.query("UPDATE action_log SET bot_reply_id = $1 WHERE entity = 'transaction' AND entity_id = $2", [botReplyId, execResult.data.id]);
+            } else if (payload.action.tool === 'transfer_between_pockets') {
+              await pool.query('UPDATE pocket_transfers SET bot_reply_id = $1 WHERE id = $2', [botReplyId, execResult.data.id]);
+              await pool.query("UPDATE action_log SET bot_reply_id = $1 WHERE entity = 'transfer' AND entity_id = $2", [botReplyId, execResult.data.id]);
+            }
+          }
+
+          await addChatMessage('user', text);
+          await addChatMessage('assistant', execResult.reply);
+          return;
+        }
+      } else if (lower === 'tidak' || lower === 'nggak' || lower === 'gak') {
+        const active = await getActivePendingAction();
+        if (active) {
+          await resolvePendingAction(active.id, 'rejected');
+          const cancelMsg = 'Aksi telah dibatalkan.';
+          await sendText(rawRemoteJid, cancelMsg);
+          await addChatMessage('user', text);
+          await addChatMessage('assistant', cancelMsg);
+          return;
+        }
+      }
+    }
+
+    // 7. Regex fast-path commands (ping, bantuan, saldo, kantong, batal, ralat, reset)
+    if (text) {
+      const regexReply = await handleRegexCommand(text, { quotedStanzaId });
       if (regexReply) {
         await sendText(rawRemoteJid, regexReply);
+        await addChatMessage('user', text);
+        await addChatMessage('assistant', regexReply);
         return;
       }
     }
 
-    // 8. Media tanpa teks
+    // 8. Media tanpa teks (Fase 6 Vision)
     if (hasMedia && !text) {
       await sendText(rawRemoteJid, 'Fitur gambar belum aktif.');
       return;
@@ -172,15 +230,75 @@ async function processSingleMessage(msg) {
       return;
     }
 
-    // Panggil AI Groq untuk merespons percakapan santai
-    logger.info('Meneruskan pesan santai ke AI Agent (Groq)...');
-    const aiReply = await replyChat(text);
-    await sendText(rawRemoteJid, aiReply);
+    // 10. Agentic AI (Fase 2: Understand -> Validate -> Execute -> Respond)
+    logger.info('Meneruskan pesan ke AI Agent (Understand)...');
+    const understood = await understandMessage(text);
+    logger.info({ intent: understood.intent, actionsCount: understood.actions?.length }, 'Hasil pemahaman AI');
+
+    // Catat pesan pengguna ke memori riwayat chat
+    await addChatMessage('user', text);
+
+    // Kasus 1: Obrolan santai biasa tanpa aksi keuangan
+    if (understood.intent === 'chat_biasa' || (understood.actions.length === 0 && !understood.clarification)) {
+      const aiReply = await replyChat(text);
+      await sendText(rawRemoteJid, aiReply);
+      await addChatMessage('assistant', aiReply);
+      return;
+    }
+
+    // Kasus 2: Pesan ambigu memerlukan klarifikasi
+    if (understood.intent === 'klarifikasi') {
+      const clarifyMsg = understood.clarification || 'Bisa tolong jelaskan kembali atau diperinci maksud pesanmu?';
+      await sendText(rawRemoteJid, clarifyMsg);
+      await addChatMessage('assistant', clarifyMsg);
+      return;
+    }
+
+    // Kasus 3: Menjalankan daftar aksi keuangan
+    const replies = [];
+    const executedResults = [];
+
+    for (const action of understood.actions) {
+      const res = await executeTool(action, {
+        messageText: text,
+        confidence: understood.confidence,
+        waMessageId: key.id,
+      });
+
+      replies.push(res.reply);
+      executedResults.push({ action, res });
+
+      // Jika salah satu aksi masuk ke pending (butuh konfirmasi), stop aksi berikutnya
+      if (res.status === 'pending') {
+        break;
+      }
+    }
+
+    const combinedReply = replies.join('\n\n---\n\n');
+    const replyIds = await sendText(rawRemoteJid, combinedReply);
+    const botReplyId = replyIds?.[0] || null;
+
+    if (botReplyId) {
+      for (const item of executedResults) {
+        const entityId = item.res.data?.id || item.res.data?.transaction?.id;
+        if (entityId) {
+          if (item.action.tool === 'add_transaction' || item.action.tool === 'set_monthly_income') {
+            await pool.query('UPDATE transactions SET bot_reply_id = $1 WHERE id = $2', [botReplyId, entityId]);
+            await pool.query("UPDATE action_log SET bot_reply_id = $1 WHERE entity = 'transaction' AND entity_id = $2", [botReplyId, entityId]);
+          } else if (item.action.tool === 'transfer_between_pockets') {
+            await pool.query('UPDATE pocket_transfers SET bot_reply_id = $1 WHERE id = $2', [botReplyId, entityId]);
+            await pool.query("UPDATE action_log SET bot_reply_id = $1 WHERE entity = 'transfer' AND entity_id = $2", [botReplyId, entityId]);
+          }
+        }
+      }
+    }
+
+    await addChatMessage('assistant', combinedReply);
   } catch (err) {
-    logger.error({ err: err.message }, 'Terjadi kesalahan saat memproses pesan');
+    logger.error({ err: err.message, stack: err.stack }, 'Terjadi kesalahan saat memproses pesan');
     try {
       if (msg.key?.remoteJid) {
-        await sendText(msg.key.remoteJid, 'Maaf, ada gangguan. Coba lagi sebentar ya.');
+        await sendText(msg.key.remoteJid, 'Maaf, ada gangguan teknis. Coba lagi sebentar ya.');
       }
     } catch {}
   }

@@ -5,6 +5,7 @@ import { runMigrations } from './db/migrate.js';
 import { startServer, stopServer } from './api/server.js';
 import { startBot, stopBot, registerMessageHandler } from './bot/connection.js';
 import { handleMessagesUpsert } from './bot/router.js';
+import { initJobs, stopJobs } from './jobs/index.js';
 
 logger.info(
   {
@@ -38,7 +39,10 @@ async function bootstrap() {
     // 3. Jalankan HTTP server Express
     server = await startServer(env.PORT, env.HOST);
 
-    // 4. Inisialisasi bot WhatsApp
+    // 4. Inisialisasi scheduler cron jobs
+    initJobs();
+
+    // 5. Inisialisasi bot WhatsApp
     registerMessageHandler(handleMessagesUpsert);
     await startBot();
   } catch (err) {
@@ -53,6 +57,12 @@ async function cleanup(signal = '') {
   if (isCleaningUp) return;
   isCleaningUp = true;
   logger.info({ signal }, 'Menghentikan proses aplikasi secara graceful...');
+
+  try {
+    stopJobs();
+  } catch (err) {
+    logger.error({ err: err.message }, 'Gagal menghentikan cron jobs');
+  }
 
   try {
     await stopBot();
