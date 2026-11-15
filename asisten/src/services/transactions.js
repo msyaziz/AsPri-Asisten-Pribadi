@@ -109,7 +109,74 @@ export async function addTransaction(params, client = pool) {
     [transaction.id, safeJson(transaction), botReplyId]
   );
 
-  return transaction;
+  // Periksa kantong menipis (Checkpoint E — prd.md §8.9)
+  const lowBalanceAlert = await checkLowBalanceAlert(periodId, pocketId, client);
+
+  return { ...transaction, lowBalanceAlert };
+}
+
+/**
+ * Periksa apakah saldo kantong < 20% dari alokasi setelah transaksi.
+ * Jika ya dan low_alert_sent = FALSE, tandai sebagai sudah dikirim dan return info peringatan.
+ * Idempoten: hanya alert sekali per kantong per periode.
+ *
+ * @param {number} periodId
+ * @param {number|null} pocketId
+ * @param {import('pg').PoolClient} client
+ * @returns {Promise<{ pocketName: string, balance: bigint, allocAmount: bigint }|null>}
+ */
+export async function checkLowBalanceAlert(periodId, pocketId, client = pool) {
+  if (!pocketId) return null;
+
+  const res = await client.query(
+    `SELECT
+       pp.alloc_amount,
+       pp.low_alert_sent,
+       p.name AS pocket_name,
+       COALESCE(
+         (SELECT SUM(t.amount)
+          FROM transactions t
+          WHERE t.period_id = pp.period_id
+            AND t.pocket_id = pp.pocket_id
+            AND t.type = 'keluar'
+            AND t.deleted_at IS NULL),
+         0
+       ) AS total_spent,
+       pp.rollover_in
+     FROM period_pockets pp
+     JOIN pockets p ON p.id = pp.pocket_id
+     WHERE pp.period_id = $1 AND pp.pocket_id = $2`,
+    [periodId, pocketId]
+  );
+
+  if (res.rows.length === 0) return null;
+
+  const row = res.rows[0];
+  if (row.low_alert_sent) return null; // sudah dikirim sebelumnya
+
+  const allocAmount = BigInt(row.alloc_amount) + BigInt(row.rollover_in);
+  if (allocAmount <= 0n) return null; // kantong tidak punya alokasi
+
+  const totalSpent = BigInt(row.total_spent);
+  const balance = allocAmount - totalSpent;
+
+  // Threshold: < 20% dari alokasi
+  const threshold = allocAmount / 5n; // 20%
+  if (balance >= threshold) return null;
+
+  // Tandai low_alert_sent = TRUE (idempoten)
+  await client.query(
+    `UPDATE period_pockets
+     SET low_alert_sent = TRUE
+     WHERE period_id = $1 AND pocket_id = $2`,
+    [periodId, pocketId]
+  );
+
+  return {
+    pocketName: row.pocket_name,
+    balance,
+    allocAmount,
+  };
 }
 
 /**

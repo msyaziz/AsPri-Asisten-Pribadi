@@ -84,8 +84,11 @@ export async function chatCompletion({
     throw new Error('GROQ_API_KEY belum dikonfigurasi di .env');
   }
 
+  const fallbackModel = 'openai/gpt-oss-20b';
+  let currentModel = model;
+
   const payload = {
-    model,
+    model: currentModel,
     messages,
     temperature,
     max_tokens: maxTokens,
@@ -97,7 +100,7 @@ export async function chatCompletion({
 
   const startTime = Date.now();
   let attempt = 0;
-  const maxAttempts = 2; // 1 kali panggilan + 1 retry
+  const maxAttempts = 5; // hingga 5 percobaan — lebih resilient terhadap Groq rate-limit 429
 
   while (attempt < maxAttempts) {
     attempt++;
@@ -122,8 +125,26 @@ export async function chatCompletion({
         const errorBody = await res.text();
         const retryAfterHeader = res.headers.get('retry-after');
 
+        // Jika model utama rate-limited (429), beralih ke model cadangan
+        if (res.status === 429 && currentModel !== fallbackModel) {
+          logger.warn(
+            { from: currentModel, to: fallbackModel },
+            'Groq rate-limit 429 pada model utama, beralih ke model cadangan...'
+          );
+          currentModel = fallbackModel;
+          payload.model = fallbackModel;
+          continue;
+        }
+
         if ((res.status === 429 || res.status >= 500) && attempt < maxAttempts) {
           const retryAfterSec = retryAfterHeader ? parseInt(retryAfterHeader, 10) : 2;
+          if (retryAfterSec > 30) {
+            logger.warn(
+              { status: res.status, retryAfterSec },
+              'Groq rate-limit terlalu lama (> 30s), melewati batas toleransi transient.'
+            );
+            break;
+          }
           logger.warn(
             { status: res.status, attempt, retryAfterSec },
             'Groq API mengembalikan error transient, mencoba ulang...'
@@ -134,7 +155,7 @@ export async function chatCompletion({
 
         const latencyMs = Date.now() - startTime;
         await logAiUsage({
-          model,
+          model: currentModel,
           purpose,
           tokensIn: null,
           tokensOut: null,
@@ -155,7 +176,7 @@ export async function chatCompletion({
       const tokensOut = data.usage?.completion_tokens || null;
 
       await logAiUsage({
-        model,
+        model: currentModel,
         purpose,
         tokensIn,
         tokensOut,

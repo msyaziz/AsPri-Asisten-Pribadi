@@ -12,10 +12,12 @@ import { replyChat } from '../ai/chat.js';
 import { understandMessage } from '../ai/understand.js';
 import { executeTool } from '../tools/index.js';
 import { getActivePendingAction, resolvePendingAction } from '../services/pendingActions.js';
+import { learnFromCorrection } from '../services/categories.js';
 import { addChatMessage } from '../services/chatHistory.js';
 import { ensurePreviousPeriodsClosed } from '../services/rollover.js';
 import { nowWib } from '../utils/time.js';
 import { CONSTANTS } from '../config/constants.js';
+import { formatRupiah } from '../utils/rupiah.js';
 
 // Antrean serial untuk seluruh pemrosesan pesan (concurrency: 1) demi stabilitas RAM & urutan pesan
 const messageProcessingQueue = new PQueue({ concurrency: 1 });
@@ -157,14 +159,97 @@ export async function processSingleMessage(msg) {
       logger.warn({ err: err.message }, 'Gagal menjalankan lazy closure periode');
     }
 
-    // 6. Cek pending_actions (konfirmasi ya / tidak)
+    // 6. Cek pending_actions (konfirmasi ya / tidak / pilihan angka kategori)
     if (text) {
-      const lower = text.trim().toLowerCase();
-      if (lower === 'ya' || lower === 'y' || lower === 'ok' || lower === 'lanjut') {
-        const active = await getActivePendingAction();
-        if (active) {
+      const active = await getActivePendingAction();
+      if (active) {
+        const payload = typeof active.payload === 'string' ? JSON.parse(active.payload) : active.payload;
+        const lower = text.trim().toLowerCase();
+
+        // Kasus 1: Pembatalan eksplisit (tidak / batal / gak / cancel)
+        if (lower === 'tidak' || lower === 'nggak' || lower === 'gak' || lower === 'batal' || lower === 'cancel') {
+          await resolvePendingAction(active.id, 'rejected');
+          const cancelMsg = 'Aksi telah dibatalkan.';
+          await sendText(rawRemoteJid, cancelMsg);
+          await addChatMessage('user', text);
+          await addChatMessage('assistant', cancelMsg);
+          return;
+        }
+
+        // Kasus 2: Konfirmasi pemilihan kategori (Lapis 3: pilih_kategori)
+        if (active.type === 'pilih_kategori') {
+          const categories = payload.categories || [];
+          let chosenCat = null;
+
+          // Cek apakah input berupa nomor pilihan (misal: "1", "2", "#1")
+          const numMatch = text.trim().match(/^#?(\d+)$/);
+          if (numMatch) {
+            const idx = parseInt(numMatch[1], 10) - 1;
+            if (idx >= 0 && idx < categories.length) {
+              chosenCat = categories[idx];
+            }
+          }
+
+          // Cek apakah input berupa nama kategori langsung (misal: "makanan", "transport")
+          if (!chosenCat) {
+            chosenCat = categories.find((c) => c.name.toLowerCase() === lower);
+          }
+
+          if (chosenCat) {
+            await resolvePendingAction(active.id, 'confirmed');
+
+            const actionToExec = {
+              ...payload.action,
+              args: {
+                ...payload.action.args,
+                category: chosenCat.name,
+                categoryId: chosenCat.id,
+                pocketId: chosenCat.default_pocket_id,
+              },
+            };
+
+            const execResult = await executeTool(actionToExec, {
+              ...payload.context,
+              skipConfirmation: true,
+              waMessageId: key.id,
+            });
+
+            // Belajar dari pilihan kategori pengguna (Fase 3 Checkpoint B)
+            const textToLearn = payload.action.args.note || payload.context?.messageText;
+            if (textToLearn) {
+              await learnFromCorrection({ text: textToLearn, categoryId: chosenCat.id });
+            }
+
+            const replyIds = await sendText(rawRemoteJid, execResult.reply);
+            const botReplyId = replyIds?.[0] || null;
+            if (botReplyId && execResult.data?.id) {
+              await pool.query('UPDATE transactions SET bot_reply_id = $1 WHERE id = $2', [botReplyId, execResult.data.id]);
+              await pool.query("UPDATE action_log SET bot_reply_id = $1 WHERE entity = 'transaction' AND entity_id = $2", [botReplyId, execResult.data.id]);
+            }
+
+            // Kirim peringatan kantong menipis jika ada (Checkpoint E)
+            if (execResult.data?.lowBalanceAlert) {
+              const { pocketName, balance, allocAmount } = execResult.data.lowBalanceAlert;
+              const pct = allocAmount > 0n ? Math.round(Number((balance * 100n) / allocAmount)) : 0;
+              const alertMsg = `⚠️ *Kantong ${pocketName} menipis!* Sisa ${formatRupiah(balance)} (${pct}% dari alokasi).`;
+              await sendText(rawRemoteJid, alertMsg);
+            }
+
+            await addChatMessage('user', text);
+            await addChatMessage('assistant', execResult.reply);
+            return;
+          } else {
+            const invalidMsg = `Pilihan tidak valid. Silakan balas dengan nomor 1 - ${categories.length} atau ketik *batal*.`;
+            await sendText(rawRemoteJid, invalidMsg);
+            await addChatMessage('user', text);
+            await addChatMessage('assistant', invalidMsg);
+            return;
+          }
+        }
+
+        // Kasus 3: Konfirmasi ya/tidak biasa ('konfirmasi_aksi')
+        if (lower === 'ya' || lower === 'y' || lower === 'ok' || lower === 'lanjut') {
           await resolvePendingAction(active.id, 'confirmed');
-          const payload = typeof active.payload === 'string' ? JSON.parse(active.payload) : active.payload;
 
           const execResult = await executeTool(payload.action, {
             ...payload.context,
@@ -186,16 +271,6 @@ export async function processSingleMessage(msg) {
 
           await addChatMessage('user', text);
           await addChatMessage('assistant', execResult.reply);
-          return;
-        }
-      } else if (lower === 'tidak' || lower === 'nggak' || lower === 'gak') {
-        const active = await getActivePendingAction();
-        if (active) {
-          await resolvePendingAction(active.id, 'rejected');
-          const cancelMsg = 'Aksi telah dibatalkan.';
-          await sendText(rawRemoteJid, cancelMsg);
-          await addChatMessage('user', text);
-          await addChatMessage('assistant', cancelMsg);
           return;
         }
       }
@@ -257,6 +332,7 @@ export async function processSingleMessage(msg) {
     // Kasus 3: Menjalankan daftar aksi keuangan
     const replies = [];
     const executedResults = [];
+    const lowBalanceWarnings = []; // kumpulkan peringatan kantong menipis
 
     for (const action of understood.actions) {
       const res = await executeTool(action, {
@@ -268,13 +344,25 @@ export async function processSingleMessage(msg) {
       replies.push(res.reply);
       executedResults.push({ action, res });
 
+      // Kumpulkan peringatan kantong menipis dari transaksi yang berhasil
+      if (res.data?.lowBalanceAlert) {
+        const { pocketName, balance, allocAmount } = res.data.lowBalanceAlert;
+        const pct = allocAmount > 0n ? Math.round(Number((balance * 100n) / allocAmount)) : 0;
+        lowBalanceWarnings.push(
+          `⚠️ *Kantong ${pocketName} menipis!* Sisa ${formatRupiah(balance)} (${pct}% dari alokasi).`
+        );
+      }
+
       // Jika salah satu aksi masuk ke pending (butuh konfirmasi), stop aksi berikutnya
       if (res.status === 'pending') {
         break;
       }
     }
 
-    const combinedReply = replies.join('\n\n---\n\n');
+    // Gabungkan reply + peringatan kantong menipis
+    const warningText =
+      lowBalanceWarnings.length > 0 ? '\n\n' + lowBalanceWarnings.join('\n') : '';
+    const combinedReply = replies.join('\n\n---\n\n') + warningText;
     const replyIds = await sendText(rawRemoteJid, combinedReply);
     const botReplyId = replyIds?.[0] || null;
 

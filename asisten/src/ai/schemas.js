@@ -82,6 +82,80 @@ export const TransferBetweenPocketsActionSchema = z.object({
   }),
 });
 
+// Tool Baca untuk Tanya Data (Fase 3 & prd.md §12.4)
+export const GetTotalMoneyActionSchema = z.object({
+  tool: z.literal('get_total_money'),
+  args: z.object({}).optional().default({}),
+});
+
+export const GetPocketBalanceActionSchema = z.object({
+  tool: z.literal('get_pocket_balance'),
+  args: z
+    .object({
+      pocket: z.string().nullable().optional(),
+    })
+    .optional()
+    .default({}),
+});
+
+export const GetMainBalanceActionSchema = z.object({
+  tool: z.literal('get_main_balance'),
+  args: z.object({}).optional().default({}),
+});
+
+export const GetSpendingActionSchema = z.object({
+  tool: z.literal('get_spending'),
+  args: z
+    .object({
+      range: z.string().nullable().optional(),
+      date_from: z.string().nullable().optional(),
+      date_to: z.string().nullable().optional(),
+      category: z.string().nullable().optional(),
+      pocket: z.string().nullable().optional(),
+    })
+    .optional()
+    .default({}),
+});
+
+export const GetIncomeActionSchema = z.object({
+  tool: z.literal('get_income'),
+  args: z
+    .object({
+      range: z.string().nullable().optional(),
+      date_from: z.string().nullable().optional(),
+      date_to: z.string().nullable().optional(),
+    })
+    .optional()
+    .default({}),
+});
+
+export const ListTransactionsActionSchema = z.object({
+  tool: z.literal('list_transactions'),
+  args: z
+    .object({
+      range: z.string().nullable().optional(),
+      date_from: z.string().nullable().optional(),
+      date_to: z.string().nullable().optional(),
+      limit: z.number().int().positive().max(50).optional().default(10),
+      type: z.enum(['masuk', 'keluar']).optional(),
+      pocket: z.string().nullable().optional(),
+      category: z.string().nullable().optional(),
+    })
+    .optional()
+    .default({}),
+});
+
+export const GetMonthlyReportActionSchema = z.object({
+  tool: z.literal('get_monthly_report'),
+  args: z
+    .object({
+      year: z.number().int().optional(),
+      month: z.number().int().min(1).max(12).optional(),
+    })
+    .optional()
+    .default({}),
+});
+
 export const ActionSchema = z.discriminatedUnion('tool', [
   AddTransactionActionSchema,
   SetMonthlyIncomeActionSchema,
@@ -91,6 +165,13 @@ export const ActionSchema = z.discriminatedUnion('tool', [
   SetPocketActiveActionSchema,
   SetRolloverModeActionSchema,
   TransferBetweenPocketsActionSchema,
+  GetTotalMoneyActionSchema,
+  GetPocketBalanceActionSchema,
+  GetMainBalanceActionSchema,
+  GetSpendingActionSchema,
+  GetIncomeActionSchema,
+  ListTransactionsActionSchema,
+  GetMonthlyReportActionSchema,
 ]);
 
 export const INTENTS = [
@@ -98,6 +179,7 @@ export const INTENTS = [
   'uang_bulanan',
   'atur_kantong',
   'transfer_kantong',
+  'tanya_data',
   'chat_biasa',
   'klarifikasi',
 ];

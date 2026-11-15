@@ -20,7 +20,14 @@ import { addTransaction, setMonthlyIncome } from '../services/transactions.js';
 import { transferBetweenPockets } from '../services/transfers.js';
 import { createPendingAction } from '../services/pendingActions.js';
 import { formatRupiah, extractRupiah } from '../utils/rupiah.js';
-import { matchCategoryRule } from '../ai/understand.js';
+import { findCategoryByRule, getCategories, getCategoryByName } from '../services/categories.js';
+import {
+  getSpendingReport,
+  getIncomeReport,
+  listTransactionsReport,
+  getMonthlyFinancialReport,
+} from '../services/reports.js';
+import { respondToDataQuery } from '../ai/respond.js';
 import { logger } from '../utils/logger.js';
 
 /**
@@ -34,6 +41,11 @@ import { logger } from '../utils/logger.js';
 function checkNeedsConfirmation(action, confidence, originalText) {
   const tool = action.tool;
   const args = action.args;
+
+  // Untuk add_transaction dengan confidence < 0.6, serahkan ke Lapis 3 (pilih_kategori)
+  if (tool === 'add_transaction' && confidence < 0.6) {
+    return { needsConfirm: false, reason: null };
+  }
 
   // 1. Confidence AI rendah (< 0.7)
   if (confidence < 0.7) {
@@ -86,9 +98,10 @@ export async function executeTool(action, context = {}) {
     waMessageId = null,
     botReplyId = null,
     skipConfirmation = false,
+    periodId = null,
   } = context;
 
-  const currentPeriod = await ensureCurrentPeriod();
+  const currentPeriod = periodId ? { id: periodId } : await ensureCurrentPeriod();
 
   // 1. Cek apakah aksi memerlukan konfirmasi (jika belum dilewati lewat "ya")
   if (!skipConfirmation) {
@@ -125,35 +138,81 @@ export async function executeTool(action, context = {}) {
   // 2. Eksekusi tool sesuai nama tool
   switch (action.tool) {
     case 'add_transaction': {
-      const { type, amount, category: catName, pocket: pocketName, note, date } = action.args;
+      const {
+        type = 'keluar',
+        amount,
+        category: catName,
+        categoryId: directCatId,
+        pocketId: directPocketId,
+        pocket: pocketName,
+        note,
+        date,
+      } = action.args;
 
-      let categoryId = null;
-      let pocketId = null;
+      let categoryId = directCatId || null;
+      let pocketId = directPocketId || null;
 
-      // Cari kategori
-      if (catName) {
-        const catRes = await pool.query(
-          'SELECT id, default_pocket_id FROM categories WHERE LOWER(name) = LOWER($1)',
-          [catName.trim()]
-        );
-        if (catRes.rows.length > 0) {
-          categoryId = catRes.rows[0].id;
-          pocketId = catRes.rows[0].default_pocket_id;
+      // Cari kategori dari catName jika belum ada ID
+      if (!categoryId && catName) {
+        const cat = await getCategoryByName(catName);
+        if (cat) {
+          categoryId = cat.id;
+          pocketId = pocketId || cat.default_pocket_id;
         }
       }
 
       // Jika kategori belum ketemu, cek aturan kata kunci (category_rules)
       if (!categoryId) {
-        const ruleMatch = await matchCategoryRule(note || messageText);
+        const ruleMatch = await findCategoryByRule(note || messageText);
         if (ruleMatch) {
-          const catRes = await pool.query(
-            'SELECT id, default_pocket_id FROM categories WHERE LOWER(name) = LOWER($1)',
-            [ruleMatch.categoryName]
-          );
-          if (catRes.rows.length > 0) {
-            categoryId = catRes.rows[0].id;
-            pocketId = catRes.rows[0].default_pocket_id;
-          }
+          categoryId = ruleMatch.categoryId;
+          pocketId = pocketId || ruleMatch.defaultPocketId;
+        }
+      }
+
+      // Lapis 3: Tanya Pengguna (confidence < 0.6 atau kategori tidak ditemukan)
+      if (!skipConfirmation && (!categoryId || confidence < 0.6)) {
+        const activeCategories = await getCategories({
+          activeOnly: true,
+          type: type === 'masuk' ? 'masuk' : 'keluar',
+        });
+
+        if (activeCategories.length > 0) {
+          const pa = await createPendingAction({
+            type: 'pilih_kategori',
+            payload: {
+              action: {
+                ...action,
+                args: { ...action.args, type, amount, note, date },
+              },
+              context: { ...context, skipConfirmation: true },
+              categories: activeCategories.map((c) => ({
+                id: c.id,
+                name: c.name,
+                default_pocket_id: c.default_pocket_id,
+                default_pocket_name: c.default_pocket_name,
+              })),
+            },
+            waMessageId,
+            botReplyId,
+            timeoutMinutes: 10,
+          });
+
+          const catListStr = activeCategories
+            .map((c, i) => `${i + 1}. ${c.name}${c.default_pocket_name ? ' (' + c.default_pocket_name + ')' : ''}`)
+            .join('\n');
+
+          const desc = `${type === 'keluar' ? 'Pengeluaran' : 'Pemasukan'} ${formatRupiah(amount)}${note ? ' (' + note + ')' : ''}`;
+
+          return {
+            status: 'pending',
+            reply:
+              `❓ *Pilih Kategori*\n` +
+              `Untuk transaksi: ${desc}\n\n` +
+              `Silakan balas dengan nomor kategori:\n${catListStr}\n\n` +
+              `Atau ketik *batal* untuk membatalkan.`,
+            data: pa,
+          };
         }
       }
 
@@ -334,6 +393,116 @@ export async function executeTool(action, context = {}) {
         reply: `✅ Mode rollover kantong *${updated.name}* diatur ke *${modeDesc}* (${mode}).`,
         data: updated,
       };
+    }
+
+    // ---------- Tool Baca / Tanya Data (Fase 3 & prd.md §12.4) ----------
+    case 'get_total_money': {
+      const data = await getTotalMoney(currentPeriod.id);
+      const pockets = await getPocketBalances(currentPeriod.id);
+      const safeData = {
+        grandTotal: Number(data.grandTotal),
+        mainBalance: Number(data.mainBalance),
+        pocketTotal: Number(data.pocketTotal),
+        pockets: pockets.map((p) => ({
+          name: p.name,
+          balance: Number(p.currentBalance),
+        })),
+      };
+      const reply = await respondToDataQuery({
+        question: messageText || 'Total uang saya berapa?',
+        data: safeData,
+      });
+      return { status: 'executed', reply, data: safeData };
+    }
+
+    case 'get_pocket_balance': {
+      const pocketName = action.args?.pocket;
+      let safeData;
+      if (pocketName) {
+        const p = await getPocketByName(pocketName);
+        if (!p) throw new Error(`Kantong '${pocketName}' tidak ditemukan.`);
+        const bal = await getPocketBalance(currentPeriod.id, p.id);
+        safeData = { name: p.name, balance: Number(bal) };
+      } else {
+        const pockets = await getPocketBalances(currentPeriod.id);
+        safeData = pockets.map((p) => ({
+          name: p.name,
+          balance: Number(p.currentBalance),
+          rolloverMode: p.rolloverMode,
+        }));
+      }
+      const reply = await respondToDataQuery({
+        question: messageText || 'Berapa saldo kantong?',
+        data: safeData,
+      });
+      return { status: 'executed', reply, data: safeData };
+    }
+
+    case 'get_main_balance': {
+      const bal = await getMainBalance(currentPeriod.id);
+      const safeData = { mainBalance: Number(bal) };
+      const reply = await respondToDataQuery({
+        question: messageText || 'Berapa saldo utama saya?',
+        data: safeData,
+      });
+      return { status: 'executed', reply, data: safeData };
+    }
+
+    case 'get_spending': {
+      const data = await getSpendingReport({
+        range: action.args?.range,
+        dateFrom: action.args?.date_from,
+        dateTo: action.args?.date_to,
+        category: action.args?.category,
+        pocket: action.args?.pocket,
+      });
+      const reply = await respondToDataQuery({
+        question: messageText || 'Berapa pengeluaran saya?',
+        data,
+      });
+      return { status: 'executed', reply, data };
+    }
+
+    case 'get_income': {
+      const data = await getIncomeReport({
+        range: action.args?.range,
+        dateFrom: action.args?.date_from,
+        dateTo: action.args?.date_to,
+      });
+      const reply = await respondToDataQuery({
+        question: messageText || 'Berapa pemasukan saya?',
+        data,
+      });
+      return { status: 'executed', reply, data };
+    }
+
+    case 'list_transactions': {
+      const data = await listTransactionsReport({
+        range: action.args?.range,
+        dateFrom: action.args?.date_from,
+        dateTo: action.args?.date_to,
+        limit: action.args?.limit,
+        type: action.args?.type,
+        pocket: action.args?.pocket,
+        category: action.args?.category,
+      });
+      const reply = await respondToDataQuery({
+        question: messageText || 'Daftar transaksi saya',
+        data,
+      });
+      return { status: 'executed', reply, data };
+    }
+
+    case 'get_monthly_report': {
+      const data = await getMonthlyFinancialReport({
+        year: action.args?.year,
+        month: action.args?.month,
+      });
+      const reply = await respondToDataQuery({
+        question: messageText || 'Laporan bulanan saya',
+        data,
+      });
+      return { status: 'executed', reply, data };
     }
 
     default:

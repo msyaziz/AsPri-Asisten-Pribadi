@@ -7,6 +7,7 @@ import { pool } from '../db/pool.js';
 import { ensureCurrentPeriod, getMainBalance, getTotalMoney } from '../services/periods.js';
 import { getPocketBalances, setRolloverMode, getPocketByName } from '../services/pockets.js';
 import { getLastUndoableAction, undoAction, reviseLastTransaction } from '../services/undo.js';
+import { learnFromCorrection } from '../services/categories.js';
 import { formatRupiah, parseRupiah } from '../utils/rupiah.js';
 
 /**
@@ -170,10 +171,17 @@ export async function handleRegexCommand(text, context = {}) {
 
     const cat = catRes.rows[0];
     try {
-      const { updated } = await reviseLastTransaction({
+      const { updated, previous } = await reviseLastTransaction({
         categoryId: cat.id,
         pocketId: cat.default_pocket_id,
       });
+
+      // Belajar dari koreksi pengguna (Fase 3 Checkpoint A & prd.md §8.9)
+      const noteToLearn = updated.note || previous?.note;
+      if (noteToLearn) {
+        await learnFromCorrection({ text: noteToLearn, categoryId: cat.id });
+      }
+
       return `✅ Kategori transaksi #${updated.id} berhasil diubah menjadi *${cat.name}*.`;
     } catch (err) {
       return `Gagal mengubah kategori: ${err.message}`;

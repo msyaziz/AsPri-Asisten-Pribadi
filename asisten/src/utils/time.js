@@ -58,3 +58,54 @@ export function getSystemTimeContext() {
   const timeFormatted = dt.toFormat('HH:mm');
   return `Hari ini ${dayName}, ${dateFormatted}, pukul ${timeFormatted} WIB.`;
 }
+
+/**
+ * Menerjemahkan rentang tanggal simbolik ('today', 'yesterday', 'this_week', dll)
+ * menjadi tanggal absolut YYYY-MM-DD dalam zona waktu WIB.
+ * Sesuai prd.md §12.4.
+ * @param {string} [range]
+ * @param {string} [dateFrom]
+ * @param {string} [dateTo]
+ * @returns {{ from: string, to: string, label: string }}
+ */
+export function resolveSymbolicDateRange(range, dateFrom, dateTo) {
+  const dt = nowWib();
+  const todayStr = dt.toFormat('yyyy-MM-dd');
+
+  if (range) {
+    const r = range.toLowerCase().trim();
+    if (r === 'today' || r === 'hari_ini') {
+      return { from: todayStr, to: todayStr, label: 'hari ini' };
+    }
+    if (r === 'yesterday' || r === 'kemarin') {
+      const yStr = dt.minus({ days: 1 }).toFormat('yyyy-MM-dd');
+      return { from: yStr, to: yStr, label: 'kemarin' };
+    }
+    if (r === 'this_week' || r === 'minggu_ini') {
+      const fromStr = dt.startOf('week').toFormat('yyyy-MM-dd');
+      const toStr = dt.endOf('week').toFormat('yyyy-MM-dd');
+      return { from: fromStr, to: toStr, label: 'minggu ini' };
+    }
+    if (r === 'last_week' || r === 'minggu_lalu') {
+      const prevWeek = dt.minus({ weeks: 1 });
+      const fromStr = prevWeek.startOf('week').toFormat('yyyy-MM-dd');
+      const toStr = prevWeek.endOf('week').toFormat('yyyy-MM-dd');
+      return { from: fromStr, to: toStr, label: 'minggu lalu' };
+    }
+    if (r === 'this_month' || r === 'bulan_ini') {
+      const fromStr = dt.startOf('month').toFormat('yyyy-MM-dd');
+      const toStr = dt.endOf('month').toFormat('yyyy-MM-dd');
+      return { from: fromStr, to: toStr, label: 'bulan ini' };
+    }
+    if (r === 'last_month' || r === 'bulan_lalu') {
+      const prevMonth = dt.minus({ months: 1 });
+      const fromStr = prevMonth.startOf('month').toFormat('yyyy-MM-dd');
+      const toStr = prevMonth.endOf('month').toFormat('yyyy-MM-dd');
+      return { from: fromStr, to: toStr, label: 'bulan lalu' };
+    }
+  }
+
+  const from = dateFrom || dt.startOf('month').toFormat('yyyy-MM-dd');
+  const to = dateTo || todayStr;
+  return { from, to, label: `${from} s.d. ${to}` };
+}
