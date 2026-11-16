@@ -12,7 +12,10 @@ import { expandRecurrences } from '../src/services/events.js';
 import { expirePendingActions, createPendingAction } from '../src/services/pendingActions.js';
 import { initJobs, stopJobs } from '../src/jobs/index.js';
 
+import env from '../src/config/env.js';
+
 const sentMessages = [];
+let originalWhitelistJid = null;
 
 beforeAll(async () => {
   vi.spyOn(senderModule, 'sendText').mockImplementation(async (jid, text) => {
@@ -20,16 +23,26 @@ beforeAll(async () => {
     return { key: { id: `mock_${Date.now()}` } };
   });
 
-  // Pastikan settings whitelist_jid terisi untuk briefing
+  const prev = await pool.query("SELECT value FROM settings WHERE key = 'whitelist_jid'");
+  originalWhitelistJid = prev.rows[0]?.value;
+
+  const testJid = env.WHITELIST_JID || '6285642060441@s.whatsapp.net';
   await pool.query(
     `INSERT INTO settings (key, value)
-     VALUES ('whitelist_jid', '"628123456789@s.whatsapp.net"')
-     ON CONFLICT (key) DO UPDATE SET value = '"628123456789@s.whatsapp.net"'`
+     VALUES ('whitelist_jid', $1)
+     ON CONFLICT (key) DO UPDATE SET value = $1`,
+    [JSON.stringify(testJid)]
   );
 });
 
 afterAll(async () => {
   stopJobs();
+  if (originalWhitelistJid !== null && originalWhitelistJid !== undefined) {
+    await pool.query(
+      `UPDATE settings SET value = $1 WHERE key = 'whitelist_jid'`,
+      [originalWhitelistJid]
+    );
+  }
   await pool.query('DELETE FROM reminders');
   await pool.query("DELETE FROM events WHERE title LIKE 'TEST_JOB_%'");
   await pool.query("DELETE FROM pending_actions WHERE type LIKE 'test_job_%'");
