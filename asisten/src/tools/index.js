@@ -1,6 +1,6 @@
 /**
- * Eksekutor Tool Keuangan (Fase 2).
- * Sesuai prd.md §12.1-12.4, §8.3-8.7 dan 02-fase2-keuangan-inti.md.
+ * Eksekutor Tool Keuangan (Fase 2) + Agenda (Fase 4).
+ * Sesuai prd.md §12.1-12.4, §8.3-8.7, §8.11
  */
 
 import { pool } from '../db/pool.js';
@@ -29,6 +29,10 @@ import {
 } from '../services/reports.js';
 import { respondToDataQuery } from '../ai/respond.js';
 import { logger } from '../utils/logger.js';
+// Fase 4: Agenda
+import { addEvent, completeTask, listEvents } from '../services/events.js';
+import { addNote, searchNotes } from '../services/notes.js';
+import { formatWib } from '../utils/time.js';
 
 /**
  * Memeriksa apakah sebuah aksi memerlukan konfirmasi pengguna via pending_actions.
@@ -503,6 +507,108 @@ export async function executeTool(action, context = {}) {
         data,
       });
       return { status: 'executed', reply, data };
+    }
+
+    // ---- Fase 4: Agenda Tools ----
+
+    case 'add_event': {
+      const { kind = 'event', title, starts_at, ends_at, recurrence, remind_offsets } = action.args;
+      if (!title) throw new Error('Judul event wajib diisi.');
+      if (!starts_at) throw new Error('Waktu mulai (starts_at) wajib diisi.');
+
+      const id = await addEvent(
+        {
+          kind,
+          title,
+          startsAt: starts_at,
+          endsAt: ends_at,
+          recurrence,
+          remindOffsets: remind_offsets,
+        },
+        { botReplyId }
+      );
+
+      const kindLabel = kind === 'task' ? 'Tugas' : 'Jadwal';
+      const timeStr = formatWib(starts_at, 'dd LLL yyyy, HH:mm');
+      return {
+        status: 'executed',
+        reply:
+          `✅ *${kindLabel} Berhasil Ditambahkan*\n` +
+          `📌 ${title}\n` +
+          `🕐 ${timeStr} WIB` +
+          (recurrence ? `\n🔁 Berulang: ${recurrence}` : ''),
+        data: { id },
+      };
+    }
+
+    case 'complete_task': {
+      const { event_id, title } = action.args;
+      if (!event_id && !title) throw new Error('event_id atau title wajib diisi.');
+
+      let taskId = event_id;
+      if (!taskId && title) {
+        // Cari berdasarkan judul
+        const res = await pool.query(
+          "SELECT id FROM events WHERE kind='task' AND status='open' AND title ILIKE $1 LIMIT 1",
+          [`%${title}%`]
+        );
+        if (res.rowCount === 0) throw new Error(`Tugas "${title}" tidak ditemukan.`);
+        taskId = res.rows[0].id;
+      }
+
+      await completeTask(taskId, { botReplyId });
+      return {
+        status: 'executed',
+        reply: `✅ Tugas *${title || `#${taskId}`}* ditandai selesai.`,
+        data: { event_id: taskId },
+      };
+    }
+
+    case 'add_note': {
+      const { content, tags, note_date } = action.args;
+      if (!content) throw new Error('Isi catatan (content) wajib diisi.');
+
+      const id = await addNote(
+        {
+          content,
+          tags: tags || [],
+          noteDate: note_date,
+        },
+        { botReplyId }
+      );
+
+      return {
+        status: 'executed',
+        reply: `📝 *Catatan Disimpan* (ID: ${id})\n"${content.substring(0, 80)}${content.length > 80 ? '…' : ''}"`,
+        data: { id },
+      };
+    }
+
+    case 'list_events': {
+      const { kind, status = 'open', date } = action.args;
+      const rows = await listEvents({ kind, status, date });
+      const reply = await respondToDataQuery({
+        question: messageText || 'Daftar jadwal saya',
+        data: rows.map((r) => ({
+          id: r.id,
+          kind: r.kind,
+          title: r.title,
+          starts_at: formatWib(r.starts_at, 'dd LLL yyyy, HH:mm'),
+          status: r.status,
+        })),
+      });
+      return { status: 'executed', reply, data: rows };
+    }
+
+    case 'search_notes': {
+      const { keyword } = action.args;
+      if (!keyword) throw new Error('Kata kunci pencarian wajib diisi.');
+      const rows = await searchNotes(keyword);
+      const reply = await respondToDataQuery({
+        question: messageText || `Cari catatan: ${keyword}`,
+        data: rows,
+      });
+      return { status: 'executed', reply, data: rows };
     }
 
     default:

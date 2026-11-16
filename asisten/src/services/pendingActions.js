@@ -35,6 +35,16 @@ export async function createPendingAction(params, client = pool) {
   return res.rows[0];
 }
 
+export async function expirePendingActions(client = pool) {
+  const res = await client.query(
+    `UPDATE pending_actions
+     SET status = 'expired'
+     WHERE status = 'waiting' AND expires_at <= now()
+     RETURNING id`
+  );
+  return res.rowCount;
+}
+
 /**
  * Mengambil aksi pending yang masih aktif (belum kedaluwarsa dan status waiting).
  * Secara otomatis memperbarui status aksi yang sudah kedaluwarsa menjadi 'expired'.
@@ -43,11 +53,7 @@ export async function createPendingAction(params, client = pool) {
  */
 export async function getActivePendingAction(client = pool) {
   // Tandai yang sudah lewat waktu sebagai 'expired'
-  await client.query(
-    `UPDATE pending_actions
-     SET status = 'expired'
-     WHERE status = 'waiting' AND expires_at <= now()`
-  );
+  await expirePendingActions(client);
 
   const res = await client.query(
     `SELECT * FROM pending_actions

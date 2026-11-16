@@ -9,6 +9,7 @@ import { getPocketBalances, setRolloverMode, getPocketByName } from '../services
 import { getLastUndoableAction, undoAction, reviseLastTransaction } from '../services/undo.js';
 import { learnFromCorrection } from '../services/categories.js';
 import { formatRupiah, parseRupiah } from '../utils/rupiah.js';
+import { nowWib, formatWib } from '../utils/time.js';
 
 /**
  * Format detik menjadi teks waktu ringkas.
@@ -70,6 +71,12 @@ export async function handleRegexCommand(text, context = {}) {
       `• *Batalkan Aksi*: ketik *batal* atau reply pesan bot lalu ketik *batal*\n` +
       `• *Ralat Nominal*: "ralat jadi 30rb"\n` +
       `• *Mode Rollover*: "rollover tabungan dibawa" atau "rollover hiburan balik"\n\n` +
+      `*Fitur Agenda & Catatan (Fase 4):*\n` +
+      `• *Jadwal*: ketik *jadwal* untuk cek agenda mendatang\n` +
+      `• *Hari Ini*: ketik *hari ini* untuk ringkasan hari ini\n` +
+      `• *Tambah Jadwal/Tugas*: "rapat jam 14 besok", "tugas laporan deadline jumat"\n` +
+      `• *Tugas Selesai*: "selesai tugas laporan"\n` +
+      `• *Catatan*: "catat password wifi abc123", "cari catatan servis motor"\n\n` +
       `*Perintah Sistem:*\n` +
       `• *ping*: Cek status bot & uptime\n` +
       `• *reset*: Bersihkan memori percakapan\n` +
@@ -99,6 +106,88 @@ export async function handleRegexCommand(text, context = {}) {
     );
   }
 
+  // 4b. Perintah: jadwal atau agenda
+  if (normalized === 'jadwal' || normalized === 'agenda') {
+    const evRes = await pool.query(
+      `SELECT title, starts_at, kind, status
+       FROM events
+       WHERE deleted_at IS NULL
+         AND status = 'open'
+         AND starts_at >= now() - interval '1 hour'
+       ORDER BY starts_at ASC
+       LIMIT 10`
+    );
+
+    if (evRes.rowCount === 0) {
+      return '📅 Belum ada jadwal atau tugas mendatang.';
+    }
+
+    const lines = ['*📅 Jadwal & Tugas Mendatang:*\n'];
+    for (const ev of evRes.rows) {
+      const timeStr = formatWib(ev.starts_at, 'dd LLL, HH:mm');
+      const icon = ev.kind === 'task' ? '📌' : '🗓️';
+      lines.push(`${icon} ${timeStr} – *${ev.title}*`);
+    }
+    return lines.join('\n');
+  }
+
+  // 4c. Perintah: hari ini
+  if (normalized === 'hari ini' || normalized === 'today') {
+    const dt = nowWib();
+    const today = dt.toFormat('yyyy-MM-dd');
+    const dayLabel = dt.setLocale('id-ID').toFormat('EEEE, d LLLL yyyy');
+
+    const evRes = await pool.query(
+      `SELECT title, starts_at, kind
+       FROM events
+       WHERE deleted_at IS NULL
+         AND status = 'open'
+         AND DATE(starts_at AT TIME ZONE 'Asia/Jakarta') = $1
+       ORDER BY starts_at ASC`,
+      [today]
+    );
+
+    const taskRes = await pool.query(
+      `SELECT title FROM events
+       WHERE deleted_at IS NULL
+         AND kind = 'task'
+         AND status = 'open'
+       ORDER BY starts_at ASC LIMIT 5`
+    );
+
+    const spendRes = await pool.query(
+      `SELECT COALESCE(SUM(amount), 0) AS total
+       FROM transactions
+       WHERE deleted_at IS NULL
+         AND type = 'keluar'
+         AND tx_date = $1`,
+      [today]
+    );
+
+    const lines = [`*📋 Ringkasan Hari Ini – ${dayLabel}*\n`];
+
+    if (evRes.rowCount > 0) {
+      lines.push('*📅 Jadwal Hari Ini:*');
+      for (const ev of evRes.rows) {
+        lines.push(`• ${formatWib(ev.starts_at, 'HH:mm')} – ${ev.title}`);
+      }
+    } else {
+      lines.push('📅 Tidak ada jadwal untuk hari ini.');
+    }
+
+    if (taskRes.rowCount > 0) {
+      lines.push('\n*📌 Tugas Aktif:*');
+      for (const t of taskRes.rows) {
+        lines.push(`• ${t.title}`);
+      }
+    }
+
+    const spendTotal = Number(spendRes.rows[0].total);
+    lines.push(`\n💸 *Pengeluaran Hari Ini:* ${formatRupiah(spendTotal)}`);
+
+    return lines.join('\n');
+  }
+
   // 5. Perintah: batal / undo / hapus yang tadi
   if (
     normalized === 'batal' ||
@@ -117,20 +206,26 @@ export async function handleRegexCommand(text, context = {}) {
 
     try {
       const res = await undoAction(undoable.id);
-      const currentPeriod = await ensureCurrentPeriod();
-      const total = await getTotalMoney(currentPeriod.id);
 
       let desc = 'Aksi terakhir';
+      let extra = '';
       if (res.entity === 'transaction') {
         desc = res.undoneAction === 'create' ? 'Transaksi' : 'Penghapusan transaksi';
+        const currentPeriod = await ensureCurrentPeriod();
+        const total = await getTotalMoney(currentPeriod.id);
+        extra = `\nSaldo telah dipulihkan. Total uang saat ini: ${formatRupiah(total.grandTotal)}.`;
       } else if (res.entity === 'transfer') {
         desc = 'Transfer';
+        const currentPeriod = await ensureCurrentPeriod();
+        const total = await getTotalMoney(currentPeriod.id);
+        extra = `\nSaldo telah dipulihkan. Total uang saat ini: ${formatRupiah(total.grandTotal)}.`;
+      } else if (res.entity === 'event') {
+        desc = res.undoneAction === 'create' ? 'Jadwal / tugas' : 'Penyelesaian tugas';
+      } else if (res.entity === 'note') {
+        desc = 'Catatan';
       }
 
-      return (
-        `✅ ${desc} berhasil dibatalkan.\n` +
-        `Saldo telah dipulihkan. Total uang saat ini: ${formatRupiah(total.grandTotal)}.`
-      );
+      return `✅ ${desc} berhasil dibatalkan.${extra}`;
     } catch (err) {
       return `Gagal membatalkan aksi: ${err.message}`;
     }

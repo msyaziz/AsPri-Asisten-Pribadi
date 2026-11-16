@@ -1,6 +1,6 @@
 /**
  * Skema Zod untuk Agentic AI (Understand & Actions).
- * Sesuai prd.md §12.3, §12.5 dan 02-fase2-keuangan-inti.md.
+ * Sesuai prd.md §12.3, §12.5, 02-fase2-keuangan-inti.md, 04-fase4-agenda.md.
  */
 
 import { z } from 'zod';
@@ -75,8 +75,8 @@ export const SetRolloverModeActionSchema = z.object({
 export const TransferBetweenPocketsActionSchema = z.object({
   tool: z.literal('transfer_between_pockets'),
   args: z.object({
-    from: z.string().nullable().optional(), // 'utama' / null = Saldo Utama
-    to: z.string().nullable().optional(),   // 'utama' / null = Saldo Utama
+    from: z.string().nullable().optional(),
+    to: z.string().nullable().optional(),
     amount: z.number().int().positive().max(1_000_000_000),
     note: z.string().max(200).nullable().optional(),
   }),
@@ -156,6 +156,56 @@ export const GetMonthlyReportActionSchema = z.object({
     .default({}),
 });
 
+// ---- Fase 4: Agenda Action Schemas ----
+
+export const AddEventActionSchema = z.object({
+  tool: z.literal('add_event'),
+  args: z.object({
+    kind: z.enum(['event', 'task']).default('event'),
+    title: z.string().min(1).max(200),
+    starts_at: z.string().min(1), // ISO datetime string
+    ends_at: z.string().optional(),
+    recurrence: z.string().optional(), // 'daily' | 'weekly:MON' | 'monthly:15'
+    remind_offsets: z.array(z.number().int().nonnegative()).optional(),
+  }),
+});
+
+export const CompleteTaskActionSchema = z.object({
+  tool: z.literal('complete_task'),
+  args: z.object({
+    event_id: z.number().int().positive().optional(),
+    title: z.string().optional(), // fallback: cari berdasarkan judul
+  }),
+});
+
+export const AddNoteActionSchema = z.object({
+  tool: z.literal('add_note'),
+  args: z.object({
+    content: z.string().min(1).max(2000),
+    tags: z.array(z.string()).optional(),
+    note_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+  }),
+});
+
+export const ListEventsActionSchema = z.object({
+  tool: z.literal('list_events'),
+  args: z
+    .object({
+      kind: z.enum(['event', 'task']).optional(),
+      status: z.enum(['open', 'completed']).optional(),
+      date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    })
+    .optional()
+    .default({}),
+});
+
+export const SearchNotesActionSchema = z.object({
+  tool: z.literal('search_notes'),
+  args: z.object({
+    keyword: z.string().min(1),
+  }),
+});
+
 export const ActionSchema = z.discriminatedUnion('tool', [
   AddTransactionActionSchema,
   SetMonthlyIncomeActionSchema,
@@ -172,6 +222,12 @@ export const ActionSchema = z.discriminatedUnion('tool', [
   GetIncomeActionSchema,
   ListTransactionsActionSchema,
   GetMonthlyReportActionSchema,
+  // Fase 4
+  AddEventActionSchema,
+  CompleteTaskActionSchema,
+  AddNoteActionSchema,
+  ListEventsActionSchema,
+  SearchNotesActionSchema,
 ]);
 
 export const INTENTS = [
@@ -182,6 +238,10 @@ export const INTENTS = [
   'tanya_data',
   'chat_biasa',
   'klarifikasi',
+  // Fase 4
+  'tambah_jadwal',
+  'selesai_tugas',
+  'catat_note',
 ];
 
 export const UnderstandSchema = z.object({

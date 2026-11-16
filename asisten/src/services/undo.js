@@ -117,6 +117,51 @@ export async function undoAction(actionLogId, opts = {}) {
       );
       detail = restoreRes.rows[0];
     }
+  } else if (entity === 'event') {
+    if (action === 'create') {
+      // Membatalkan pembuatan jadwal/tugas -> soft delete + hapus reminders
+      const delRes = await client.query(
+        'UPDATE events SET deleted_at = now() WHERE id = $1 RETURNING *',
+        [entityId]
+      );
+      await client.query('DELETE FROM reminders WHERE event_id = $1', [entityId]);
+      detail = delRes.rows[0];
+    } else if (action === 'update') {
+      // Membatalkan update/selesai tugas -> pulihkan status lama
+      const beforeData =
+        typeof logRow.before_data === 'string'
+          ? JSON.parse(logRow.before_data)
+          : logRow.before_data;
+      const prevStatus = beforeData?.status || 'open';
+      const restoreRes = await client.query(
+        'UPDATE events SET status = $1 WHERE id = $2 RETURNING *',
+        [prevStatus, entityId]
+      );
+      detail = restoreRes.rows[0];
+    } else if (action === 'delete') {
+      // Membatalkan penghapusan event -> restore
+      const restoreRes = await client.query(
+        'UPDATE events SET deleted_at = NULL WHERE id = $1 RETURNING *',
+        [entityId]
+      );
+      detail = restoreRes.rows[0];
+    }
+  } else if (entity === 'note') {
+    if (action === 'create') {
+      // Membatalkan pembuatan catatan -> soft delete
+      const delRes = await client.query(
+        'UPDATE notes SET deleted_at = now() WHERE id = $1 RETURNING *',
+        [entityId]
+      );
+      detail = delRes.rows[0];
+    } else if (action === 'delete') {
+      // Membatalkan penghapusan catatan -> restore
+      const restoreRes = await client.query(
+        'UPDATE notes SET deleted_at = NULL WHERE id = $1 RETURNING *',
+        [entityId]
+      );
+      detail = restoreRes.rows[0];
+    }
   } else {
     throw new Error(`Entitas '${entity}' belum mendukung undo.`);
   }
