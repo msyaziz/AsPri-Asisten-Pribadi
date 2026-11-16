@@ -7,5 +7,3 @@ data/*
 *.log
 logs/
 .DS_Store
-*.md
-!README.md
