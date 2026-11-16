@@ -121,15 +121,29 @@ export async function getPocketBalance(periodId, pocketId, client = pool) {
  * @returns {Promise<object>}
  */
 export async function createPocket(
-  { name, sortOrder = 0, rolloverMode = 'carry' },
+  nameOrObj,
+  rolloverMode = 'carry',
+  sortOrder = 0,
+  _isSavingsGoal = false,
   client = pool
 ) {
+  let name, rm, so;
+  if (typeof nameOrObj === 'object' && nameOrObj !== null) {
+    name = nameOrObj.name;
+    rm = nameOrObj.rolloverMode || rolloverMode;
+    so = nameOrObj.sortOrder !== undefined ? nameOrObj.sortOrder : sortOrder;
+    if (nameOrObj.client) client = nameOrObj.client;
+  } else {
+    name = nameOrObj;
+    rm = rolloverMode;
+    so = sortOrder;
+  }
   const trimmed = name.trim();
   const res = await client.query(
     `INSERT INTO pockets (name, sort_order, rollover_mode)
      VALUES ($1, $2, $3)
      RETURNING *`,
-    [trimmed, sortOrder, rolloverMode]
+    [trimmed, so, rm]
   );
   const pocket = res.rows[0];
 
@@ -213,6 +227,51 @@ export async function setRolloverMode(idOrName, mode, client = pool) {
   }
   return res.rows[0];
 }
+
+/**
+ * Memperbarui data kantong (nama, is_active, sort_order, rollover_mode).
+ * @param {number} id
+ * @param {object} patch
+ * @param {import('pg').PoolClient} [client]
+ * @returns {Promise<object>}
+ */
+export async function updatePocket(id, patch, client = pool) {
+  const updates = [];
+  const values = [];
+
+  if (patch.name !== undefined) {
+    values.push(patch.name.trim());
+    updates.push(`name = $${values.length}`);
+  }
+  if (patch.isActive !== undefined) {
+    values.push(Boolean(patch.isActive));
+    updates.push(`is_active = $${values.length}`);
+  }
+  if (patch.sortOrder !== undefined) {
+    values.push(Number(patch.sortOrder));
+    updates.push(`sort_order = $${values.length}`);
+  }
+  if (patch.rolloverMode !== undefined) {
+    if (patch.rolloverMode !== 'carry' && patch.rolloverMode !== 'return') {
+      throw new Error(`Mode rollover tidak valid: ${patch.rolloverMode}`);
+    }
+    values.push(patch.rolloverMode);
+    updates.push(`rollover_mode = $${values.length}`);
+  }
+
+  if (updates.length === 0) {
+    return getPocketById(id, client);
+  }
+
+  values.push(id);
+  const sql = `UPDATE pockets SET ${updates.join(', ')} WHERE id = $${values.length} RETURNING *`;
+  const res = await client.query(sql, values);
+  if (res.rows.length === 0) {
+    throw new Error(`Kantong dengan ID ${id} tidak ditemukan.`);
+  }
+  return res.rows[0];
+}
+
 
 /**
  * Mengatur alokasi persentase/nominal untuk kantong-kantong di suatu periode.

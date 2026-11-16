@@ -1,11 +1,27 @@
 import express from 'express';
 import helmet from 'helmet';
+import cookieParser from 'cookie-parser';
+import rateLimit from 'express-rate-limit';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import env from '../config/env.js';
 import { logger } from '../utils/logger.js';
+import { requireAuth, verifyOrigin } from './middleware/auth.js';
+import { createCloudflareAccessMiddleware } from './middleware/cloudflareAccess.js';
 import healthRouter from './routes/health.js';
+import authRouter from './routes/auth.js';
 import botRouter from './routes/bot.js';
+import summaryRouter from './routes/summary.js';
+import periodsRouter from './routes/periods.js';
+import pocketsRouter from './routes/pockets.js';
+import transactionsRouter from './routes/transactions.js';
+import transfersRouter from './routes/transfers.js';
+
+if (!BigInt.prototype.toJSON) {
+  BigInt.prototype.toJSON = function () {
+    return Number(this);
+  };
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.resolve(__dirname, '../../public');
@@ -16,26 +32,84 @@ export function createServer() {
   // Reverse proxy support
   app.set('trust proxy', 1);
 
-  // Security headers
+  // Security headers & CSP (izinkan CDN Tailwind & Chart.js)
   app.use(
     helmet({
-      contentSecurityPolicy: false, // Memudahkan CDN Tailwind/Chart.js pada frontend nantinya
+      contentSecurityPolicy: {
+        directives: {
+          defaultSrc: ["'self'"],
+          scriptSrc: [
+            "'self'",
+            "'unsafe-inline'",
+            'https://cdn.tailwindcss.com',
+            'https://cdn.jsdelivr.net',
+          ],
+          styleSrc: [
+            "'self'",
+            "'unsafe-inline'",
+            'https://cdn.jsdelivr.net',
+            'https://fonts.googleapis.com',
+          ],
+          fontSrc: ["'self'", 'https://fonts.gstatic.com'],
+          imgSrc: ["'self'", 'data:'],
+        },
+      },
     })
   );
 
   // Body parser dengan batas 100kb
   app.use(express.json({ limit: '100kb' }));
 
+  // Cookie parser
+  app.use(cookieParser());
+
   // Sajikan berkas statis dari public/
   app.use(express.static(publicDir));
 
-  // Route API
+  // Global rate limit: 120 per menit per IP untuk rute API
+  const apiLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 120,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: {
+      ok: false,
+      error: {
+        code: 'TOO_MANY_REQUESTS',
+        message: 'Batas permintaan tercapai (120/menit).',
+      },
+    },
+  });
+  app.use('/api', apiLimiter);
+
+  // Proteksi CSRF (verifikasi Origin untuk metode ubah-data)
+  app.use('/api', verifyOrigin);
+
+  // Public API routes
   app.use('/api/health', healthRouter);
-  app.use('/api/bot', botRouter);
+
+  // Hook Cloudflare Access (non-aktif secara default bila CF_ACCESS_ENABLED=false)
+  app.use('/api', createCloudflareAccessMiddleware());
+
+  app.use('/api/auth', authRouter);
+
+  // Protected API routes
+  app.use('/api/bot', requireAuth, botRouter);
+  app.use('/api/summary', requireAuth, summaryRouter);
+  app.use('/api/periods', requireAuth, periodsRouter);
+  app.use('/api/pockets', requireAuth, pocketsRouter);
+  app.use('/api/transactions', requireAuth, transactionsRouter);
+  app.use('/api/transfers', requireAuth, transfersRouter);
 
   // 404 handler API
   app.use('/api', (req, res) => {
-    res.status(404).json({ error: 'Endpoint tidak ditemukan' });
+    res.status(404).json({
+      ok: false,
+      error: {
+        code: 'NOT_FOUND',
+        message: 'Endpoint tidak ditemukan',
+      },
+    });
   });
 
   return app;

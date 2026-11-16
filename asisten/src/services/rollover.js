@@ -235,3 +235,94 @@ export function formatRolloverSummary(summary) {
   return lines.join('\n');
 }
 
+/**
+ * Hitung ulang berantai (recompute) periode tertutup setelah terjadi perubahan data transaksi.
+ * Memperbarui closing_balance, rollover_in, dan main_opening ke periode-periode berikutnya.
+ *
+ * @param {number} periodId
+ * @param {import('pg').PoolClient} [client]
+ * @returns {Promise<{ ok: boolean, recomputedPeriods: number[] }>}
+ */
+export async function recomputePeriod(periodId, client = pool) {
+  const pRes = await client.query('SELECT * FROM periods WHERE id = $1', [periodId]);
+  const startPeriod = pRes.rows[0];
+  if (!startPeriod) {
+    throw new Error(`Periode #${periodId} tidak ditemukan.`);
+  }
+
+  const forwardRes = await client.query(
+    `SELECT * FROM periods
+     WHERE (year > $1) OR (year = $1 AND month >= $2)
+     ORDER BY year ASC, month ASC`,
+    [startPeriod.year, startPeriod.month]
+  );
+  const periods = forwardRes.rows;
+  const recomputed = [];
+
+  for (let i = 0; i < periods.length - 1; i++) {
+    const cur = periods[i];
+    const nxt = periods[i + 1];
+
+    if (cur.status !== 'closed') {
+      break;
+    }
+
+    const mbRes = await client.query(
+      'SELECT main_balance FROM v_main_balance WHERE period_id = $1',
+      [cur.id]
+    );
+    let mainCarry = BigInt(mbRes.rows[0]?.main_balance || 0);
+
+    const pbRes = await client.query(
+      `SELECT
+         v.pocket_id,
+         v.balance,
+         p.rollover_mode,
+         pp.alloc_percent
+       FROM v_pocket_balance v
+       JOIN pockets p ON p.id = v.pocket_id
+       JOIN period_pockets pp ON pp.period_id = v.period_id AND pp.pocket_id = v.pocket_id
+       WHERE v.period_id = $1
+       ORDER BY p.sort_order, p.id`,
+      [cur.id]
+    );
+
+    for (const row of pbRes.rows) {
+      const balance = BigInt(row.balance);
+      const mode = row.rollover_mode;
+      let rolloverIn = 0n;
+
+      await client.query(
+        'UPDATE period_pockets SET closing_balance = $1 WHERE period_id = $2 AND pocket_id = $3',
+        [balance.toString(), cur.id, row.pocket_id]
+      );
+
+      if (balance > 0n) {
+        if (mode === 'carry') {
+          rolloverIn = balance;
+        } else {
+          mainCarry += balance;
+        }
+      } else if (balance < 0n) {
+        mainCarry += balance;
+      }
+
+      await client.query(
+        `UPDATE period_pockets
+         SET rollover_in = $1
+         WHERE period_id = $2 AND pocket_id = $3`,
+        [rolloverIn.toString(), nxt.id, row.pocket_id]
+      );
+    }
+
+    await client.query(
+      'UPDATE periods SET main_opening = $1 WHERE id = $2',
+      [mainCarry.toString(), nxt.id]
+    );
+
+    recomputed.push(cur.id);
+  }
+
+  return { ok: true, recomputedPeriods: recomputed };
+}
+

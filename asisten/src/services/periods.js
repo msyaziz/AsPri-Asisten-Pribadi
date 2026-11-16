@@ -5,6 +5,7 @@
 
 import { pool } from '../db/pool.js';
 import { nowWib } from '../utils/time.js';
+import { getPocketBalances } from './pockets.js';
 
 /**
  * Memastikan baris periode untuk bulan & tahun tertentu ada di database.
@@ -141,3 +142,82 @@ export async function getTotalMoney(periodId, client = pool) {
     grandTotal: mainBalance + pocketTotal,
   };
 }
+
+/**
+ * Mendapatkan daftar semua periode beserta statusnya.
+ * @param {import('pg').PoolClient} [client]
+ * @returns {Promise<Array<object>>}
+ */
+export async function listPeriods(client = pool) {
+  const res = await client.query(
+    'SELECT * FROM periods ORDER BY year DESC, month DESC'
+  );
+  return res.rows;
+}
+
+/**
+ * Mendapatkan ringkasan keuangan periode (saldo utama, saldo kantong, total masuk/keluar, jumlah transaksi).
+ * @param {string} [periodParam] Format YYYY-MM
+ * @param {import('pg').PoolClient} [client]
+ * @returns {Promise<object>}
+ */
+export async function getPeriodSummary(periodParam, client = pool) {
+  let period;
+  if (periodParam && /^\d{4}-\d{2}$/.test(periodParam)) {
+    const [y, m] = periodParam.split('-').map(Number);
+    period = await ensurePeriod(y, m, client);
+  } else {
+    period = await ensureCurrentPeriod(client);
+  }
+
+  const mainBalance = await getMainBalance(period.id, client);
+  const pockets = await getPocketBalances(period.id, client);
+  const totalMoney = await getTotalMoney(period.id, client);
+
+  const statsRes = await client.query(
+    `SELECT
+       type,
+       COUNT(id)::int AS count,
+       COALESCE(SUM(amount), 0)::bigint AS total
+     FROM transactions
+     WHERE period_id = $1 AND deleted_at IS NULL
+     GROUP BY type`,
+    [period.id]
+  );
+
+  let totalIncome = 0n;
+  let totalExpense = 0n;
+  let txCount = 0;
+
+  for (const row of statsRes.rows) {
+    txCount += row.count;
+    if (row.type === 'masuk') totalIncome += BigInt(row.total);
+    if (row.type === 'keluar') totalExpense += BigInt(row.total);
+  }
+
+  return {
+    period: {
+      id: period.id,
+      year: period.year,
+      month: period.month,
+      status: period.status,
+      label: `${period.year}-${String(period.month).padStart(2, '0')}`,
+    },
+    mainBalance: Number(mainBalance),
+    grandTotal: Number(totalMoney.grandTotal),
+    pocketsTotal: Number(totalMoney.pocketTotal),
+    totalIncome: Number(totalIncome),
+    totalExpense: Number(totalExpense),
+    transactionCount: txCount,
+    pockets: pockets.map((p) => ({
+      pocketId: p.pocketId,
+      pocketName: p.pocketName,
+      balance: Number(p.balance),
+      rolloverMode: p.rolloverMode,
+      allocPercent: p.allocPercent ? Number(p.allocPercent) : null,
+      allocAmount: Number(p.allocAmount || 0),
+    })),
+  };
+}
+
+

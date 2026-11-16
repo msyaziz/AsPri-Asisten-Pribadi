@@ -135,8 +135,21 @@ export async function transferBetweenPockets(params, client = pool) {
  * @param {import('pg').PoolClient} [client]
  * @returns {Promise<Array<object>>}
  */
-export async function getTransfers(filter, client = pool) {
+export async function getTransfers(filter = {}, client = pool) {
   const { periodId, limit = 50, offset = 0 } = filter;
+  const conditions = ['t.deleted_at IS NULL'];
+  const values = [];
+
+  if (periodId) {
+    values.push(periodId);
+    conditions.push(`t.period_id = $${values.length}`);
+  }
+
+  values.push(limit);
+  const limitIdx = values.length;
+  values.push(offset);
+  const offsetIdx = values.length;
+
   const sql = `
     SELECT
       t.*,
@@ -145,11 +158,11 @@ export async function getTransfers(filter, client = pool) {
     FROM pocket_transfers t
     LEFT JOIN pockets pf ON pf.id = t.from_pocket_id
     LEFT JOIN pockets pt ON pt.id = t.to_pocket_id
-    WHERE t.period_id = $1 AND t.deleted_at IS NULL
+    WHERE ${conditions.join(' AND ')}
     ORDER BY t.created_at DESC, t.id DESC
-    LIMIT $2 OFFSET $3
+    LIMIT $${limitIdx} OFFSET $${offsetIdx}
   `;
-  const res = await client.query(sql, [periodId, limit, offset]);
+  const res = await client.query(sql, values);
   return res.rows.map((r) => ({
     ...r,
     amount: BigInt(r.amount),

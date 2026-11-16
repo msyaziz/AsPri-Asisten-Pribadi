@@ -33,6 +33,26 @@ const envSchema = z
     GROQ_RPM_LIMIT: z.coerce.number().default(20),
 
     DATA_DIR: z.string().default('./data'),
+
+    // Fase 5: Dashboard & Auth
+    COOKIE_SECURE: z
+      .preprocess((val) => {
+        if (typeof val === 'string') return val.toLowerCase() === 'true';
+        return Boolean(val);
+      }, z.boolean())
+      .default(false),
+
+    CF_ACCESS_ENABLED: z
+      .preprocess((val) => {
+        if (typeof val === 'string') return val.toLowerCase() === 'true';
+        return Boolean(val);
+      }, z.boolean())
+      .default(false),
+
+    CF_ACCESS_TEAM_DOMAIN: z.string().optional().default(''),
+    CF_ACCESS_AUD: z.string().optional().default(''),
+    JWT_SECRET: z.string().default('default_secret_key_minimum_32_characters_long_12345'),
+    ADMIN_EMAIL: z.string().optional().default(''),
   })
   .superRefine((data, ctx) => {
     const isMigration =

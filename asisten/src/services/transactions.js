@@ -309,51 +309,101 @@ export async function setMonthlyIncome(params, client = pool) {
 export async function getTransactions(filter = {}, client = pool) {
   const {
     periodId,
+    period,
     pocketId,
     categoryId,
     type,
     dateFrom,
     dateTo,
+    aiOnly,
+    deleted,
+    q,
+    page = 1,
     limit = 50,
-    offset = 0,
   } = filter;
 
-  const conditions = ['t.deleted_at IS NULL'];
+  const conditions = [];
   const values = [];
+
+  if (deleted === true || deleted === 'true') {
+    conditions.push('t.deleted_at IS NOT NULL');
+  } else if (deleted === 'all') {
+    // semua (termasuk yang di-soft-delete)
+  } else {
+    conditions.push('t.deleted_at IS NULL');
+  }
 
   if (periodId) {
     values.push(periodId);
     conditions.push(`t.period_id = $${values.length}`);
+  } else if (period && /^\d{4}-\d{2}$/.test(period)) {
+    const [y, m] = period.split('-').map(Number);
+    values.push(y);
+    const yIdx = values.length;
+    values.push(m);
+    const mIdx = values.length;
+    conditions.push(`t.period_id IN (SELECT id FROM periods WHERE year = $${yIdx} AND month = $${mIdx})`);
   }
-  if (pocketId !== undefined) {
-    if (pocketId === null) {
+
+  if (pocketId !== undefined && pocketId !== null && pocketId !== '') {
+    if (pocketId === 'null' || pocketId === 0) {
       conditions.push('t.pocket_id IS NULL');
     } else {
-      values.push(pocketId);
+      values.push(Number(pocketId));
       conditions.push(`t.pocket_id = $${values.length}`);
     }
   }
-  if (categoryId) {
-    values.push(categoryId);
+
+  if (categoryId !== undefined && categoryId !== null && categoryId !== '') {
+    values.push(Number(categoryId));
     conditions.push(`t.category_id = $${values.length}`);
   }
+
   if (type) {
     values.push(type);
     conditions.push(`t.type = $${values.length}`);
   }
+
   if (dateFrom) {
     values.push(dateFrom);
     conditions.push(`t.tx_date >= $${values.length}`);
   }
+
   if (dateTo) {
     values.push(dateTo);
     conditions.push(`t.tx_date <= $${values.length}`);
   }
 
-  values.push(limit);
-  const limitIdx = values.length;
-  values.push(offset);
-  const offsetIdx = values.length;
+  if (aiOnly === true || aiOnly === 'true') {
+    conditions.push('t.ai_confidence IS NOT NULL');
+  }
+
+  if (q && q.trim()) {
+    values.push(`%${q.trim()}%`);
+    const qIdx = values.length;
+    conditions.push(`(t.note ILIKE $${qIdx} OR c.name ILIKE $${qIdx} OR p.name ILIKE $${qIdx})`);
+  }
+
+  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+  // Hitung total untuk paginasi
+  const countSql = `
+    SELECT COUNT(t.id)::int AS total
+    FROM transactions t
+    LEFT JOIN pockets p ON p.id = t.pocket_id
+    LEFT JOIN categories c ON c.id = t.category_id
+    ${whereClause}
+  `;
+  const countRes = await client.query(countSql, values);
+  const total = countRes.rows[0]?.total || 0;
+
+  const numLimit = Math.max(1, Math.min(Number(limit) || 50, 100));
+  const numPage = Math.max(1, Number(page) || 1);
+  const offset = (numPage - 1) * numLimit;
+
+  const queryValues = [...values, numLimit, offset];
+  const limitIdx = queryValues.length - 1;
+  const offsetIdx = queryValues.length;
 
   const sql = `
     SELECT
@@ -363,16 +413,24 @@ export async function getTransactions(filter = {}, client = pool) {
     FROM transactions t
     LEFT JOIN pockets p ON p.id = t.pocket_id
     LEFT JOIN categories c ON c.id = t.category_id
-    WHERE ${conditions.join(' AND ')}
+    ${whereClause}
     ORDER BY t.tx_date DESC, t.id DESC
     LIMIT $${limitIdx} OFFSET $${offsetIdx}
   `;
 
-  const res = await client.query(sql, values);
-  return res.rows.map((r) => ({
+  const res = await client.query(sql, queryValues);
+  const items = res.rows.map((r) => ({
     ...r,
     amount: BigInt(r.amount),
   }));
+
+  return {
+    total,
+    page: numPage,
+    limit: numLimit,
+    totalPages: Math.ceil(total / numLimit),
+    transactions: items,
+  };
 }
 
 /**
@@ -532,3 +590,41 @@ async function recalculateMonthlyAllocations(periodId, client = pool) {
     );
   }
 }
+
+/**
+ * Memulihkan transaksi yang dihapus (restore soft-delete).
+ * @param {number|bigint} id
+ * @param {import('pg').PoolClient} [client]
+ * @returns {Promise<object>}
+ */
+export async function restoreTransaction(id, client = pool) {
+  const existing = await getTransactionById(id, client);
+  if (!existing) {
+    throw new Error(`Transaksi #${id} tidak ditemukan.`);
+  }
+  if (!existing.deleted_at) {
+    return existing;
+  }
+
+  const res = await client.query(
+    'UPDATE transactions SET deleted_at = NULL WHERE id = $1 RETURNING *',
+    [id]
+  );
+  const restored = res.rows[0];
+
+  await client.query(
+    `INSERT INTO action_log (entity, entity_id, action, before_data, after_data)
+     VALUES ('transaction', $1, 'restore', $2, $3)`,
+    [id, safeJson(existing), safeJson(restored)]
+  );
+
+  if (existing.is_monthly_income) {
+    await recalculateMonthlyAllocations(existing.period_id, client);
+  }
+
+  return {
+    ...restored,
+    amount: BigInt(restored.amount),
+  };
+}
+
