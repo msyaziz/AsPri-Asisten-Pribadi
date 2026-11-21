@@ -51,14 +51,14 @@ Ketentuan teknis (non-visual): format `Intl.NumberFormat('id-ID')`, tanggal WIB,
 | Flag hidup menutup akses | `CF_ACCESS_ENABLED=true` tanpa header → `403` (diuji dengan konfigurasi tiruan) |
 
 ## 7. Definisi Selesai (versi laptop)
-- [ ] Tanpa login, semua `/api/*` (kecuali health/login) → 401.
-- [ ] Rate limit login dan cek `Origin` teruji.
-- [ ] Middleware Cloudflare Access lolos semua unit test JWT tiruan, dan **default mati**.
-- [ ] Angka dashboard = angka balasan bot (sumber sama: view/service).
-- [ ] Hapus/pulihkan transaksi di dashboard memperbarui saldo.
-- [ ] Edit transaksi di periode tertutup memicu `recompute` berantai dan hasilnya benar.
-- [ ] Tidak ada rahasia/QR bocor di respons yang tidak terautentikasi.
-- [ ] Semua halaman bisa dibuka di `http://localhost:3000`.
+- [x] Tanpa login, semua `/api/*` (kecuali health/login) → 401.
+- [x] Rate limit login dan cek `Origin` teruji.
+- [x] Middleware Cloudflare Access lolos semua unit test JWT tiruan, dan **default mati**.
+- [x] Angka dashboard = angka balasan bot (sumber sama: view/service).
+- [x] Hapus/pulihkan transaksi di dashboard memperbarui saldo.
+- [x] Edit transaksi di periode tertutup memicu `recompute` berantai dan hasilnya benar.
+- [x] Tidak ada rahasia/QR bocor di respons yang tidak terautentikasi.
+- [x] Semua halaman bisa dibuka di `http://localhost:3000`.
 
 > Yang **tidak** dibuktikan di fase ini (dipindah ke Fase 8): domain publik, Cloudflare Tunnel, Cloudflare Access sungguhan, cookie `Secure` di HTTPS, Nginx.
 

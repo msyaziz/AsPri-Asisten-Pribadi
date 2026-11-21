@@ -16,6 +16,12 @@ import periodsRouter from './routes/periods.js';
 import pocketsRouter from './routes/pockets.js';
 import transactionsRouter from './routes/transactions.js';
 import transfersRouter from './routes/transfers.js';
+import eventsRouter from './routes/events.js';
+import notesRouter from './routes/notes.js';
+import { categoriesRouter, categoryRulesRouter } from './routes/categories.js';
+import { actionLogRouter, aiUsageRouter, pendingRouter } from './routes/logs.js';
+import settingsRouter from './routes/settings.js';
+import { reportsRouter, exportRouter } from './routes/reports.js';
 
 if (!BigInt.prototype.toJSON) {
   BigInt.prototype.toJSON = function () {
@@ -100,6 +106,16 @@ export function createServer() {
   app.use('/api/pockets', requireAuth, pocketsRouter);
   app.use('/api/transactions', requireAuth, transactionsRouter);
   app.use('/api/transfers', requireAuth, transfersRouter);
+  app.use('/api/events', requireAuth, eventsRouter);
+  app.use('/api/notes', requireAuth, notesRouter);
+  app.use('/api/categories', requireAuth, categoriesRouter);
+  app.use('/api/category-rules', requireAuth, categoryRulesRouter);
+  app.use('/api/action-log', requireAuth, actionLogRouter);
+  app.use('/api/ai-usage', requireAuth, aiUsageRouter);
+  app.use('/api/pending', requireAuth, pendingRouter);
+  app.use('/api/settings', requireAuth, settingsRouter);
+  app.use('/api/reports', requireAuth, reportsRouter);
+  app.use('/api/export', requireAuth, exportRouter);
 
   // 404 handler API
   app.use('/api', (req, res) => {

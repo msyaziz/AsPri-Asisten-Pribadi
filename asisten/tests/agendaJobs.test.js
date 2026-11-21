@@ -40,7 +40,7 @@ afterAll(async () => {
   if (originalWhitelistJid !== null && originalWhitelistJid !== undefined) {
     await pool.query(
       `UPDATE settings SET value = $1 WHERE key = 'whitelist_jid'`,
-      [originalWhitelistJid]
+      [JSON.stringify(originalWhitelistJid)]
     );
   }
   await pool.query('DELETE FROM reminders');

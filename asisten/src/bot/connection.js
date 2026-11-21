@@ -314,3 +314,14 @@ export async function stopBot() {
   status.state = 'disconnected';
   logger.info('WhatsApp socket ditutup.');
 }
+
+/**
+ * Memulai ulang koneksi Baileys.
+ */
+export async function restartBot() {
+  await stopBot();
+  isStopping = false;
+  return startBot();
+}
+
+export { generateQrSvg };

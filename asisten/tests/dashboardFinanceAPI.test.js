@@ -264,7 +264,7 @@ describe('Checkpoint C — API Keuangan Dashboard', () => {
   it('7. POST & DELETE /api/transfers: transfer antar kantong/saldo utama', async () => {
     // Beri saldo pada periode uji agar Saldo Utama cukup untuk ditransfer
     await pool.query(
-      "INSERT INTO transactions (period_id, type, amount, note, tx_date) VALUES ($1, 'masuk', 100000, 'TEST_DASHBOARD_Income_Transfer', CURRENT_DATE)",
+      "INSERT INTO transactions (period_id, type, amount, note, tx_date, source) VALUES ($1, 'masuk', 10000000, 'TEST_DASHBOARD_Income_Transfer', CURRENT_DATE, 'dashboard')",
       [testPeriod.id]
     );
 

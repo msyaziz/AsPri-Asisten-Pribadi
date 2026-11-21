@@ -291,3 +291,53 @@ export async function getCategoryRules({ categoryId = null, limit = 100 } = {}) 
   const res = await pool.query(query, params);
   return res.rows;
 }
+
+/**
+ * Menghapus aturan kategori berdasarkan ID.
+ * @param {number} id
+ * @returns {Promise<object>}
+ */
+export async function deleteCategoryRule(id) {
+  const res = await pool.query('DELETE FROM category_rules WHERE id = $1 RETURNING *', [id]);
+  if (res.rowCount === 0) {
+    throw new Error(`Aturan kategori #${id} tidak ditemukan.`);
+  }
+  return res.rows[0];
+}
+
+/**
+ * Memperbarui aturan kategori (keyword atau category_id).
+ * @param {number} id
+ * @param {{ keyword?: string, categoryId?: number }} updates
+ * @returns {Promise<object>}
+ */
+export async function updateCategoryRule(id, updates = {}) {
+  const sets = [];
+  const values = [];
+
+  if (updates.keyword !== undefined) {
+    const kw = updates.keyword.trim().toLowerCase();
+    if (!kw) throw new Error('Keyword tidak boleh kosong.');
+    values.push(kw);
+    sets.push(`keyword = $${values.length}`);
+  }
+  if (updates.categoryId !== undefined) {
+    values.push(updates.categoryId);
+    sets.push(`category_id = $${values.length}`);
+  }
+
+  if (sets.length === 0) {
+    const check = await pool.query('SELECT * FROM category_rules WHERE id = $1', [id]);
+    if (check.rowCount === 0) throw new Error(`Aturan kategori #${id} tidak ditemukan.`);
+    return check.rows[0];
+  }
+
+  sets.push('updated_at = now()');
+  values.push(id);
+  const sql = `UPDATE category_rules SET ${sets.join(', ')} WHERE id = $${values.length} RETURNING *`;
+  const res = await pool.query(sql, values);
+  if (res.rowCount === 0) {
+    throw new Error(`Aturan kategori #${id} tidak ditemukan.`);
+  }
+  return res.rows[0];
+}

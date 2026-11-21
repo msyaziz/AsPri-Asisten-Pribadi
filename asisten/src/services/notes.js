@@ -91,26 +91,118 @@ export async function deleteNote(noteId, opts = {}) {
 }
 
 /**
- * List catatan terbaru (opsional filter tanggal).
+ * Mengambil satu catatan berdasarkan ID.
+ * @param {number} id
+ * @param {import('pg').PoolClient} [client]
+ * @returns {Promise<object|null>}
+ */
+export async function getNoteById(id, client = pool) {
+  const res = await client.query('SELECT * FROM notes WHERE id = $1', [id]);
+  return res.rows[0] || null;
+}
+
+/**
+ * List catatan dengan filter kata kunci, tanggal, tag, dan paginasi.
  * @param {object} [filter]
+ * @param {string} [filter.q]
  * @param {string} [filter.date] YYYY-MM-DD
+ * @param {string} [filter.tag]
+ * @param {number} [filter.limit=50]
+ * @param {number} [filter.offset=0]
  * @returns {Promise<object[]>}
  */
 export async function listNotes(filter = {}) {
+  const conditions = ['deleted_at IS NULL'];
   const values = [];
-  let where = 'WHERE deleted_at IS NULL';
+
   if (filter.date) {
     values.push(filter.date);
-    where += ` AND note_date = $${values.length}`;
+    conditions.push(`note_date = $${values.length}`);
   }
+  if (filter.tag) {
+    values.push(filter.tag);
+    conditions.push(`$${values.length} = ANY(tags)`);
+  }
+  if (filter.q) {
+    values.push(filter.q);
+    conditions.push(`(to_tsvector('simple', content) @@ plainto_tsquery('simple', $${values.length}) OR content ILIKE '%' || $${values.length} || '%')`);
+  }
+
+  const limit = Number(filter.limit) || 50;
+  const offset = Number(filter.offset) || 0;
+  values.push(limit);
+  const limitIdx = values.length;
+  values.push(offset);
+  const offsetIdx = values.length;
+
   const res = await pool.query(
     `SELECT id, content, tags, note_date, created_at
-     FROM notes ${where}
-     ORDER BY created_at DESC LIMIT 30`,
+     FROM notes
+     WHERE ${conditions.join(' AND ')}
+     ORDER BY created_at DESC
+     LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
     values
   );
   return res.rows;
 }
 
-export default { addNote, searchNotes, deleteNote, listNotes };
+/**
+ * Memperbarui catatan.
+ * @param {number} id
+ * @param {{ content?: string, tags?: string[], noteDate?: string }} data
+ * @param {object} [opts]
+ * @returns {Promise<object>}
+ */
+export async function updateNote(id, data = {}, opts = {}) {
+  const client = opts.client || pool;
+  const updates = [];
+  const values = [];
+
+  if (data.content !== undefined) {
+    const trimmed = data.content.trim();
+    if (!trimmed) throw new Error('Konten catatan tidak boleh kosong.');
+    values.push(trimmed);
+    updates.push(`content = $${values.length}`);
+  }
+  if (data.tags !== undefined) {
+    values.push(data.tags);
+    updates.push(`tags = $${values.length}::text[]`);
+  }
+  if (data.noteDate !== undefined) {
+    values.push(data.noteDate);
+    updates.push(`note_date = $${values.length}`);
+  }
+
+  if (updates.length === 0) {
+    return getNoteById(id, client);
+  }
+
+  values.push(id);
+  const sql = `UPDATE notes SET ${updates.join(', ')} WHERE id = $${values.length} AND deleted_at IS NULL RETURNING *`;
+  const res = await client.query(sql, values);
+  if (res.rowCount === 0) {
+    throw new Error(`Catatan #${id} tidak ditemukan.`);
+  }
+  return res.rows[0];
+}
+
+/**
+ * Memulihkan catatan yang terhapus (soft delete).
+ * @param {number} id
+ * @param {object} [opts]
+ * @returns {Promise<object>}
+ */
+export async function restoreNote(id, opts = {}) {
+  const client = opts.client || pool;
+  const res = await client.query(
+    'UPDATE notes SET deleted_at = NULL WHERE id = $1 AND deleted_at IS NOT NULL RETURNING *',
+    [id]
+  );
+  if (res.rowCount === 0) {
+    throw new Error(`Catatan #${id} tidak ditemukan atau tidak sedang dihapus.`);
+  }
+  return res.rows[0];
+}
+
+export default { addNote, searchNotes, deleteNote, listNotes, getNoteById, updateNote, restoreNote };
 

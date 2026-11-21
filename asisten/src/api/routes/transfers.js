@@ -57,11 +57,11 @@ router.post('/', async (req, res) => {
       periodId = curPeriod.id;
     }
 
-    const transfer = await transferBetweenPockets({
+    const result = await transferBetweenPockets({
       ...parsed.data,
       periodId,
     });
-    res.json({ ok: true, data: transfer });
+    res.json({ ok: true, data: result.transfer || result });
   } catch (err) {
     res.status(400).json({
       ok: false,

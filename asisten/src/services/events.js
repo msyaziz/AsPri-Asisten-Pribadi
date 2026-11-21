@@ -129,11 +129,25 @@ export async function completeTask(eventId, opts = {}) {
 }
 
 /**
+ * Mengambil satu event berdasarkan ID.
+ * @param {number} id
+ * @param {import('pg').PoolClient} [client]
+ * @returns {Promise<object|null>}
+ */
+export async function getEventById(id, client = pool) {
+  const res = await client.query('SELECT * FROM events WHERE id = $1', [id]);
+  return res.rows[0] || null;
+}
+
+/**
  * Daftar events/tasks dengan filter opsional.
  * @param {object} [filter]
  * @param {string} [filter.kind] 'event'|'task'
  * @param {string} [filter.status] 'open'|'done'|'cancelled'
  * @param {string} [filter.date] YYYY-MM-DD
+ * @param {string} [filter.from] ISO date string
+ * @param {string} [filter.to] ISO date string
+ * @param {boolean} [filter.includeDeleted]
  * @returns {Promise<object[]>}
  */
 export async function listEvents(filter = {}) {
@@ -141,6 +155,9 @@ export async function listEvents(filter = {}) {
   const values = [];
   let idx = 1;
 
+  if (!filter.includeDeleted) {
+    conditions.push('deleted_at IS NULL');
+  }
   if (filter.kind) {
     conditions.push(`kind = $${idx++}`);
     values.push(filter.kind);
@@ -153,6 +170,14 @@ export async function listEvents(filter = {}) {
     conditions.push(`DATE(starts_at AT TIME ZONE 'Asia/Jakarta') = $${idx++}`);
     values.push(filter.date);
   }
+  if (filter.from) {
+    conditions.push(`starts_at >= $${idx++}`);
+    values.push(filter.from);
+  }
+  if (filter.to) {
+    conditions.push(`starts_at <= $${idx++}`);
+    values.push(filter.to);
+  }
 
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
   const res = await pool.query(
@@ -160,6 +185,112 @@ export async function listEvents(filter = {}) {
     values
   );
   return res.rows;
+}
+
+/**
+ * Memperbarui data event/task.
+ * @param {number} id
+ * @param {object} patch
+ * @param {object} [opts]
+ * @returns {Promise<object>}
+ */
+export async function updateEvent(id, patch, opts = {}) {
+  const client = opts.client || pool;
+  const updates = [];
+  const values = [];
+
+  if (patch.title !== undefined) {
+    values.push(patch.title);
+    updates.push(`title = $${values.length}`);
+  }
+  if (patch.description !== undefined) {
+    values.push(patch.description);
+    updates.push(`description = $${values.length}`);
+  }
+  if (patch.startsAt !== undefined) {
+    values.push(patch.startsAt);
+    updates.push(`starts_at = $${values.length}`);
+  }
+  if (patch.endsAt !== undefined) {
+    values.push(patch.endsAt);
+    updates.push(`ends_at = $${values.length}`);
+  }
+  if (patch.status !== undefined) {
+    values.push(patch.status);
+    updates.push(`status = $${values.length}`);
+  }
+  if (patch.kind !== undefined) {
+    values.push(patch.kind);
+    updates.push(`kind = $${values.length}`);
+  }
+  if (patch.recurrence !== undefined) {
+    values.push(patch.recurrence);
+    updates.push(`recurrence = $${values.length}`);
+  }
+  if (patch.allDay !== undefined) {
+    values.push(Boolean(patch.allDay));
+    updates.push(`all_day = $${values.length}`);
+  }
+
+  if (updates.length === 0) {
+    return getEventById(id, client);
+  }
+
+  values.push(id);
+  const sql = `UPDATE events SET ${updates.join(', ')} WHERE id = $${values.length} AND deleted_at IS NULL RETURNING *`;
+  const res = await client.query(sql, values);
+  if (res.rows.length === 0) {
+    throw new Error(`Event #${id} tidak ditemukan.`);
+  }
+
+  const ev = res.rows[0];
+  if (patch.startsAt !== undefined) {
+    await client.query('DELETE FROM reminders WHERE event_id = $1', [id]);
+    const offsets = ev.remind_offsets || (await getDefaultOffsets());
+    await createReminders(ev.id, ev.starts_at, offsets);
+  }
+
+  return ev;
+}
+
+/**
+ * Soft delete event/task.
+ * @param {number} id
+ * @param {object} [opts]
+ * @returns {Promise<object>}
+ */
+export async function deleteEvent(id, opts = {}) {
+  const client = opts.client || pool;
+  const res = await client.query(
+    'UPDATE events SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL RETURNING *',
+    [id]
+  );
+  if (res.rows.length === 0) {
+    throw new Error(`Event #${id} tidak ditemukan.`);
+  }
+  await client.query('DELETE FROM reminders WHERE event_id = $1', [id]);
+  return res.rows[0];
+}
+
+/**
+ * Pulihkan event/task yang telah dihapus.
+ * @param {number} id
+ * @param {object} [opts]
+ * @returns {Promise<object>}
+ */
+export async function restoreEvent(id, opts = {}) {
+  const client = opts.client || pool;
+  const res = await client.query(
+    'UPDATE events SET deleted_at = NULL WHERE id = $1 AND deleted_at IS NOT NULL RETURNING *',
+    [id]
+  );
+  if (res.rows.length === 0) {
+    throw new Error(`Event #${id} tidak ditemukan atau tidak sedang dihapus.`);
+  }
+  const ev = res.rows[0];
+  const offsets = ev.remind_offsets || (await getDefaultOffsets());
+  await createReminders(ev.id, ev.starts_at, offsets);
+  return ev;
 }
 
 /**
